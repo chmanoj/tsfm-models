@@ -179,7 +179,7 @@ metrics                  : per-config test loss on deterministic first-100 shard
 - Cross-channel receipts (D10): emit `log σ_Δ`, level relations, fallback-tier flag into `var_feats`.
 
 ### `telescope.py` (D2/D12)
-- `allocate(n_tokens, T_raw)` → per-tier counts via **halving prior** then rebalance to `coverage ≈ T_raw` (walk coarse→fine); deterministic integer ops.
+- `allocate(n_tokens, T_raw)` → per-tier counts via a **tunable ratio prior (front-loaded, coarse-reaching)** — config `model.tier_alloc_per_channel`, normalized and scaled by `n` (default reproduces the design-point `[8,8,8,8,8,4]` at n=44; literal-halving `[0.5,0.25,…]` is an available ablation) — then rebalance to `coverage ≈ T_raw` (walk coarse→fine); deterministic integer ops.
 - `coverage(counts)` / `tokens_for_coverage(T)` — invert the ladder (used by D9.2: `n = ⌊(L−Q)/C⌋` → `T_cov`).
 - `build_dispatch(counts, origin)` → per-tier raw-window slices + **channel-major** scatter positions `pos = base + c·n + t`. Asserts `count_k ≤ cap_k`.
 
@@ -374,6 +374,16 @@ Designed in from the start; the seams below are honored from Stage 6 onward and 
 - **Checkpoint discipline (D13).** Save/restore **model + optimizer + per-rank dataloader/reservoir state**; the mandatory end-of-phase-1 checkpoint must restart at a **different world size** (re-shard deterministically; reservoir refills).
 
 ---
+
+## Counts vs. capacity (resolved — do not re-flag)
+
+D12's `[8,8,8,8,8,4]` was derived for the C=21 design point and never disambiguated between *per-channel* and *per-buffer*; those scale oppositely as C varies, so the literal vector cannot be a static cap. Resolution — decouple two concepts the config conflated:
+
+- **Per-tier counts are dynamic per-segment data, not config constants.** Per-channel budget `n = ⌊(L_pack − Q)/C⌋` (D9). Distribute `n` across the 6 tiers by a **ratio prior** (config `model.tier_alloc_per_channel`, normalized), tuned so `n=44` reproduces `[8,8,8,8,8,4]`. Rebalance against `T_raw` (coarse→fine) so a long univariate crop piles tokens into the finer tiers it can fill and a short/high-C crop collapses to 1–2 tiers. Counts sum to ≤ `n` per channel and ≤ `L_pack` per buffer, and vary every buffer. Computed in `telescope.allocate` / `window_sampler`.
+- **Dispatch capacity is static, routed by indices (MoE trick), not padded per-tier value tensors.** A `[B, cap_k, PATCH_k, 2]` value tensor would have to be ≈`L_pack`-sized per tier (worst case: a univariate buffer that is mostly one tier) → massive padding waste. Instead: one static context-slot space `n_ctx_cap ≈ L_pack − max_Q` (config `model.n_ctx_cap`, `0` → `L_pack`); per tier a **1-D static index tensor `tier_idx[k]` `[B, cap_k]`** (sentinel-padded) selecting which slots are tier-`k`; dispatch = gather slots → `encoder_k` → scatter back. Over-provisioning 1-D int indices is cheap, so `cap_k` is a generous static bound (≈`n_ctx_cap`) and "univariate fills the buffer" just works.
+- **Config rename:** `tier_caps` → `model.tier_alloc_per_channel` (ratio prior, scaled by `n` at runtime — *not* literal counts/caps); add scalar `model.n_ctx_cap` (resolver `config.resolved_n_ctx_cap`). Per-tier `cap_k` for the index tensors derive from `n_ctx_cap`, not from the per-channel allocation.
+- **`telescope.build_dispatch`:** the `counts[k] <= caps[k]` assert is a *convenience guard*; real enforcement is buffer-level `Σ context tokens ≤ n_ctx_cap` (collator).
+- **Verification:** `test_tokenize::test_capacity_univariate_and_21ch_same_n_ctx_cap` (a long univariate crop and a 21-channel crop both dispatch under one static `n_ctx_cap`); dynamic-count layout-independence is the keystone `test_pack_invariance` (S9).
 
 ## Notes intentionally carried forward (do not re-flag)
 
