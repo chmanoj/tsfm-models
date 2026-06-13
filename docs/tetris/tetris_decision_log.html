@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TETRIS · Architecture decision log</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#1c2024; --muted:#5b6470; --faint:#8a93a0;
+  --paper:#fbfaf7; --panel:#ffffff; --line:#e3e0d8;
+  --teal:#0e6e5c; --teal-bg:#e4f1ec;
+  --amber:#8a5a0b; --amber-bg:#f7eed9;
+  --red:#8c3a32; --red-bg:#f6e7e4;
+  --blue:#1d4f8c; --blue-bg:#e7eef7;
+  --mono:'IBM Plex Mono',monospace; --sans:'IBM Plex Sans',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--sans);background:var(--paper);color:var(--ink);font-size:15.5px;line-height:1.65;}
+.wrap{max-width:880px;margin:0 auto;padding:48px 28px 96px;}
+header{border-bottom:2px solid var(--ink);padding-bottom:20px;margin-bottom:8px;}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;}
+h1{font-size:30px;font-weight:600;letter-spacing:-0.01em;line-height:1.2;}
+.subtitle{color:var(--muted);margin-top:8px;max-width:60ch;}
+.specstrip{display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--line);background:var(--panel);margin:24px 0 40px;font-family:var(--mono);font-size:12.5px;}
+.specstrip div{padding:10px 16px;border-right:1px solid var(--line);flex:1 1 auto;min-width:150px;}
+.specstrip div:last-child{border-right:none;}
+.specstrip b{display:block;font-weight:500;color:var(--faint);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:2px;}
+h2{font-size:13px;font-family:var(--mono);font-weight:500;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:48px 0 16px;display:flex;align-items:center;gap:12px;}
+h2::after{content:"";flex:1;height:1px;background:var(--line);}
+.decision{background:var(--panel);border:1px solid var(--line);margin-bottom:22px;}
+.dhead{display:flex;align-items:baseline;gap:14px;padding:16px 20px 0;}
+.dnum{font-family:var(--mono);font-size:13px;color:var(--faint);font-weight:500;}
+.dtitle{font-size:18px;font-weight:600;flex:1;}
+.dbody{padding:10px 20px 18px;}
+.dbody p{margin:8px 0;color:var(--ink);}
+.dbody p.note{color:var(--muted);font-size:14px;}
+.chip{font-family:var(--mono);font-size:11px;letter-spacing:.06em;padding:3px 9px;border-radius:3px;white-space:nowrap;font-weight:500;}
+.chip.decided{background:var(--teal-bg);color:var(--teal);}
+.chip.deferred{background:var(--amber-bg);color:var(--amber);}
+.chip.rejected{background:var(--red-bg);color:var(--red);}
+.chip.open{background:var(--blue-bg);color:var(--blue);}
+table{width:100%;border-collapse:collapse;margin:14px 0 6px;font-size:13.5px;}
+th{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);text-align:left;font-weight:500;padding:6px 10px;border-bottom:1px solid var(--line);}
+td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top;}
+tr:last-child td{border-bottom:none;}
+td.opt{font-weight:500;white-space:nowrap;}
+td.verdict{white-space:nowrap;}
+code{font-family:var(--mono);font-size:0.88em;background:#f1efe9;padding:1px 5px;border-radius:3px;}
+ul{margin:8px 0 8px 20px;}
+li{margin:5px 0;}
+.openitem{display:flex;gap:14px;padding:13px 18px;background:var(--panel);border:1px solid var(--line);border-bottom:none;align-items:baseline;}
+.openitem:last-of-type{border-bottom:1px solid var(--line);}
+.openitem .qn{font-family:var(--mono);font-size:12px;color:var(--faint);min-width:30px;}
+.openitem .qt{flex:1;}
+.openitem .qt b{font-weight:600;display:block;}
+.openitem .qt span{color:var(--muted);font-size:13.5px;}
+footer{margin-top:56px;padding-top:16px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+@media (max-width:600px){.dhead{flex-wrap:wrap}.wrap{padding:32px 16px 64px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">TETRIS · working document · rev 17 · 2026-06-12</div>
+  <h1>Multivariate triplet architecture — decision log</h1>
+  <p class="subtitle">Running record of design decisions for a time series foundation model on variable-shape multivariate inputs. Each entry records the decision, the options considered, and why alternatives were rejected or parked.</p>
+</header>
+
+<div class="specstrip">
+  <div><b>Input</b>[T_ctx × C] mixed feat/tgt</div>
+  <div><b>Output</b>[T_pred × n_targets]</div>
+  <div><b>Variates</b>any C — never dropped</div>
+  <div><b>Token budget</b>L_pack 1024 (→2048)</div>
+  <div><b>Raw T</b>unbounded, no truncation</div>
+  <div><b>Constraint</b>torch.compile, no pad waste</div>
+</div>
+
+<h2>Context</h2>
+<p>TETRIS (TElescoped TRIplets for Irregular Series) is a <strong>time series foundation model</strong>: one pretrained network that produces zero-shot multivariate forecasts on arbitrary datasets (benchmark target: top GIFT-Eval performance). The model receives only a raw numeric array — any number of channels (covariates split into features and targets), any history length, any sampling frequency, any forecast horizon, no timestamps or metadata — and must predict the targets' future values. It is pretrained once across a heterogeneous corpus of series and applied without per-dataset training. This document is the running log of architecture and training-design decisions for that model, intended to be self-sufficient for an implementation session.</p>
+
+<h2>Problem statement</h2>
+<p>One model over batches of 2-D arrays <code>[T_ctx × C]</code> where some columns are features and some are targets; predict <code>[T_pred × n_targets]</code>. All four dims vary per sample. Hard requirements: (a) no padding-to-max + flatten over covariates; (b) histories longer than the time budget must be <em>used</em>, not truncated, without linear compute blow-up; (c) training must stay torch.compile-compatible despite shape variation in two dimensions (→ static-shape designs preferred, 2-D sequence packing for batching); (d) <strong>channels are never dropped or subsampled at task/inference time</strong> — when a sample exceeds the token budget, it is always cut in the time dimension (D9 window sampling); training-crop construction may subset channels when manufacturing samples (D13). Hard capacity edge: fitting requires ≥1 token per channel, i.e. C ≤ L_pack − Q; beyond that the buffer length itself must grow.</p>
+
+<h2>Decisions</h2>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D1</span><span class="dtitle">Tokenization: span-tagged triplets</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p>Each token = <code>(t_center, span, variate, content)</code> — a (time, variate, value) triplet generalized so the "time" is an interval and the "value" is an encoding of the window. Tokens of different temporal resolution coexist in one permutation-equivariant set. Token embedding = content-encoding + time-position emb (continuous, relative to forecast origin) + span emb (log₂ patch size) + variate emb (D4) + role tag (feature/target, open O3).</p>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">Variate-as-token (iTransformer)</td><td>Whole series → 1 token; compresses time too aggressively for long contexts</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">(variate, fixed-patch) grid (MOIRAI)</td><td>Subsumed by D1+D2: telescoping is this with age-dependent patch size</td><td class="verdict"><span class="chip decided">subsumed</span></td></tr>
+      <tr><td class="opt">Raw per-observation triplets</td><td>Maximally flexible (irregular sampling, missingness) but token count explodes; evolved into span-tagged form</td><td class="verdict"><span class="chip decided">evolved → D1</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D2</span><span class="dtitle">Long history: telescoping multi-resolution tiers</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p>Fixed token budget spent non-uniformly by age; geometric patch-size ladder anchored at the forecast origin. Coverage grows exponentially in tiers while tokens grow linearly; a [1M, 1] series → ~1,280 tokens. Short series degrade gracefully (upper tiers empty → fewer tokens → absorbed by packing). Static max token count per variate ⇒ compile-friendly compute envelope.</p>
+    <table>
+      <tr><th>Tier</th><th>Patch</th><th>Coverage (steps back)</th><th>Tokens</th></tr>
+      <tr><td>0</td><td><code>×1</code> raw</td><td>0 – 256</td><td>256</td></tr>
+      <tr><td>1</td><td><code>×8</code></td><td>256 – 2.3k</td><td>256</td></tr>
+      <tr><td>2</td><td><code>×64</code></td><td>2.3k – 18.7k</td><td>256</td></tr>
+      <tr><td>3</td><td><code>×512</code></td><td>18.7k – 150k</td><td>256</td></tr>
+      <tr><td>4</td><td><code>×4096</code></td><td>150k – 1.2M</td><td>256</td></tr>
+    </table>
+    <p class="note">The ladder shown above (ratio 8, 256/tier) was the original illustration — <strong>superseded by D12's final schedule</strong> (vocabulary {4..512}, halving-prior allocation). Seasonal-phase-aware fine windows at multiples of dominant periods (ACF/FFT detection on raw values — needs no timestamps) deferred to v2 per D12.</p>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">Telescoping tiers</td><td>Static shapes, parallel, streamable, matches recency bias of forecasting; lossy in a fixed way</td><td class="verdict"><span class="chip decided">decided</span></td></tr>
+      <tr><td class="opt">Learned compressive memory</td><td>RMT / Infini-attention style chunked recurrence; learned compression, same token budget — clean v2 ablation since downstream model unchanged</td><td class="verdict"><span class="chip deferred">revisit (v2)</span></td></tr>
+      <tr><td class="opt">SSM / linear-attn prefix encoder</td><td>Needs ordered per-variate sequence — clashes with set-of-triplets core; second architecture family to tune; lossy recall</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Retrieval over history</td><td>Zero loss in principle; non-differentiable, infra-heavy; park as inference-time enhancement</td><td class="verdict"><span class="chip deferred">deferred</span></td></tr>
+      <tr><td class="opt">Frequency-domain summaries</td><td>Compact periodicity signal but hand-engineered, weak on localized events; candidate auxiliary feature only</td><td class="verdict"><span class="chip deferred">aux feature maybe</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D3</span><span class="dtitle">Per-tier learned encoders (not shared stats embedder)</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p>One input encoder per tier (5 discrete patch sizes ⇒ 5 branches; static shapes preserved). Coarse tiers: small conv/MLP over the raw window. Tier 0: <strong>not</strong> <code>Linear(1, d)</code> — a raw scalar through one linear neuron has poor spectral properties; use Fourier number features of the value → MLP. Summary statistics (mean/std/min/max/slope) may be appended as free extra inputs per patch.</p>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">Per-tier encoders + projections</td><td>More expressive; within-patch structure (e.g. an old spike) survives; 5 branches selected by tier</td><td class="verdict"><span class="chip decided">decided</span></td></tr>
+      <tr><td class="opt">Shared stats-vector embedder</td><td>One embedder for all spans, but a 4096-step window reduced to ~6 numbers; kept only as appended features</td><td class="verdict"><span class="chip rejected">rejected as primary</span></td></tr>
+    </table>
+    <p class="note">Rationale recorded on width: d_model is a residual-stream <em>workspace</em> (positions, tags, computed features accumulate additively), not an information-content match to the input — so a scalar legitimately maps into d_model. But no LLM-scale vocabulary/world-knowledge pressure exists ⇒ modest d_model (≈256–1024) is appropriate.</p>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D4</span><span class="dtitle">Variate identity: random orthonormal IDs (+ content summary)</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p><code>variate_emb(c) = random orthonormal ID (resampled per sample) + content-summary embedding</code>, added at input. The random ID is a <em>register</em>: early layers discover from content which channel matters, later layers route by tag — "discover once, address thereafter." The content embedding is a <em>prior</em> (channel signature → likely behavior); colliding embeddings for identical-content channels is correct behavior, not a bug.</p>
+    <ul>
+      <li>Same ID on all of a variate's tokens — every tier <em>and</em> its prediction query tokens (the binding mechanism for decoding).</li>
+      <li>Sample C rows of a random rotation (orthonormal ⇒ guaranteed separation at C=256); resample every training sample so IDs are usable only relationally; fix seed at inference.</li>
+      <li>Content summary: start with stats/spectral feature vector → MLP; ablate a learned pooling encoder over tier-0/1 tokens later.</li>
+      <li>Ablation queued: inject IDs into Q/K only (identity as addressing, not content).</li>
+      <li>Precedents: TabPFN v2 random feature-column embeddings; random-node-feature expressivity results in GNNs; iTransformer content-as-token.</li>
+    </ul>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">Random orthonormal IDs / sample</td><td>Equivariant in distribution; gives persistent attention routing handle</td><td class="verdict"><span class="chip decided">decided</span></td></tr>
+      <tr><td class="opt">Content-derived embedding</td><td>Complementary prior, not competitor; additive</td><td class="verdict"><span class="chip decided">decided (additive)</span></td></tr>
+      <tr><td class="opt">Binary same/diff attention bias (MOIRAI)</td><td>Symmetry without <em>addressability</em>: "channel 7 is useful" not representable as an attention pattern, must be re-derived from content every head/layer; consistent with MOIRAI's weak multivariate gains in our testing</td><td class="verdict"><span class="chip rejected">rejected as primary</span><br><span class="chip deferred">optional aux score_mod</span></td></tr>
+      <tr><td class="opt">Learned index table 0..C_max</td><td>Not permutation-equivariant; shuffling augmentation only fixes it in expectation, wastes capacity learning the symmetry</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+    </table>
+    <p class="note">Data implication: cross-variate routing only emerges if pretraining data contains genuine lead-lag / covariate structure. Channel-independent models are brutal baselines — carry this into data strategy (O6).</p>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D5</span><span class="dtitle">Attention: joint causal attention over the (C × T) grid</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p>One softmax attention per layer over the full token grid — no separate time-blocks and variate-blocks, no axial factorization. Context attention is <strong>causal in time</strong>. <strong>v1 (training regime, C ≤ 32): dense causal joint attention within each sample</strong> — token <code>(c, t)</code> attends to every token <code>(c′, t′)</code> with t′ ≤ t, all channels, all past and same timestep. The only hard masks are sample boundaries, time causality, and the D6 query rules. The log-spaced lag structure survives only as an <em>optional score bias</em> (biases shape logits at zero FLOPs and zero extra tiles). <strong>Phase 2: NSA-style learned block selection</strong> replaces dense cross-channel reachability for large-C samples and inference (see D8). Horizon query tokens (D6) attend to the entire context and to each other.</p>
+    <ul>
+      <li><strong>Direct lagged cross-channel edges</strong>: (target, t) → (feature, t−1) is a single hop — solves the lagged white-noise-feature case that defeats axial models by construction.</li>
+      <li><strong>Seasonality without metadata</strong>: input is a bare [T × C] array (no timestamps/frequency). Own-row attention covers the entire past, so within-channel seasonality at any period is learnable as content-based QK matching (attention as learned autocorrelation). Under dense attention every cross-channel lag is also reachable — no residual coverage gap.</li>
+      <li><strong>Layer mask schedule</strong>: cross-channel edges (key set B) are enabled per layer by a config flag. Early layers run with B masked off — each channel processes only its own history, building clean per-channel representations — and later layers open B to mix channels. This needs no separate block types: it is the same attention op everywhere, with a per-layer mask variant. The depth at which B opens is a hyperparameter (e.g., first ⅓ of layers channel-independent).</li>
+      <li><strong>Cost</strong> (dense, within-sample, S = C·N tokens): S²/2 score pairs per layer. Worst training case C=32, N=1280 → S ≈ 41k → ~8.4×10⁸ pairs; typical GIFT-Eval C ≈ 5 → ~2×10⁷. At C ≳ 128 dense explodes (C=256 → ~5×10¹⁰) — rare in training (accepted as a cost spike, bin-packer caps per-sample budget) and the designated job of phase-2 learned selection.</li>
+      <li><strong>Dilution bet</strong>: dense assumes the model learns to focus over up to ~40k keys without hard masks (the standard LLM bet), helped by D4 random-ID routing and the optional log-lag score bias. Remedies if it fails, in order: strengthen score bias (see the four-rung ladder in D8/A3) → curriculum via the layer mask schedule → pull NSA forward. Fixed element bands are <em>not</em> a fallback (see D8 utilization data).</li>
+    </ul>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">Dense causal joint (within sample)</td><td>100% kernel utilization by construction; superset of any band neighborhood; affordable at training C ≤ 32; zero throwaway mask code given NSA replaces selection later</td><td class="verdict"><span class="chip decided">decided (v1)</span></td></tr>
+      <tr><td class="opt">Fixed log-lag element bands</td><td>Token-granular bands (±w around log-spaced lags). Measured at training-like ratios (C ≪ B=128, N/B=10): bands touch ~60% of causal tiles anyway, ~15% tile utilization, ~3–3.5× FLOPs per attended edge — pays ~⅔ of dense cost for ~⅑ of the edges</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Block-granular lag bands</td><td>Lags defined on 128-token blocks; ~87% utilization — but optimizes hand-specified bands that phase-2 learned selection will replace (throwaway by design choice)</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">NSA-style learned block selection</td><td>Query picks top-k key blocks — learned, content-dependent sparsity; the designated mechanism for large-C and inference efficiency; selection-unit semantics depend on layout (D8/A4)</td><td class="verdict"><span class="chip deferred">phase 2</span></td></tr>
+      <tr><td class="opt">Low-rank lag-kernel bias</td><td>logit += Σ α_m(c_q,c_k)·φ_m(Δt), α from content embs; shapes scores, doesn't cut FLOPs</td><td class="verdict"><span class="chip deferred">ablation</span></td></tr>
+      <tr><td class="opt">Alternating axial time/variate</td><td>Two-hop credit path fails when target depends on lagged white-noise feature (observed in current model & Chronos-2-style setups)</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Full joint attention as universal policy</td><td>(C·T)² ≈ 1.1×10¹¹ pairs/layer at C=256 — infeasible as a C-independent default; adopted only within the training regime C ≤ 32 (rows above), large C handled by packer cap + phase 2</td><td class="verdict"><span class="chip rejected">rejected as universal</span></td></tr>
+      <tr><td class="opt">Deformable learned offsets</td><td>Cheapest learned variant; offset-collapse training risk; vision-proven</td><td class="verdict"><span class="chip deferred">dark horse</span></td></tr>
+      <tr><td class="opt">Bidirectional context attention</td><td>Better context encoding in principle, but makes the dense next-patch auxiliary loss (D6) dishonest (tokens see their own future); causal context turns every position into a valid forecast origin — LLM-grade loss density</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Short telescope for feature channels</td><td>Smaller per-channel token budget for features vs. targets; rejected — all channels get the identical telescope (uniform tokenization, simpler grid)</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Calendar/timestamp positions</td><td>Violates bare-array input contract</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Linear/kernel attn, autocorrelation mixing, learned channel graphs</td><td>Different kernel paths / dynamic sparsity; held in reserve only</td><td class="verdict"><span class="chip rejected">reserve</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D6</span><span class="dtitle">Decoding & training losses: one-shot masked query tokens</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p>Horizon decoding is non-autoregressive. For a training sample [T+p, C]: context [T, C] tokenized per D1–D3; horizon positions inserted as <strong>query tokens</strong> — learned <code>[MASK]</code> content embedding + time-position + span + channel ID + role. Queries are inserted <strong>only for target channels</strong> (known-future feature values, where a dataset has them, enter as real observed tokens over the horizon). Horizon is patchified: each query token decodes a patch (e.g., 32 steps) via a projection head ⇒ p_max = n_query_tokens × patch_size per channel per forward pass. Horizons beyond p_max: chunked rollout (predict p_max, append as context, re-anchor telescope once per chunk — amortizes the D2 origin-reanchoring ~patch-count× vs. per-patch AR).</p>
+    <ul>
+      <li><strong>Variable-p training</strong>: each sample draws p ∈ [1, p_max]; only ⌈p/patch⌉ queries inserted ⇒ any horizon length ≤ p_max works natively in one pass at inference.</li>
+      <li><strong>Mask directions</strong>: queries → all context ✓; queries → queries (same sample) ✓ (trajectory coherence); context → queries ✗ (context representations independent of attached horizon).</li>
+      <li><strong>[MASK] is a learned embedding, not zeros</strong> — zero is a valid (and post-normalization, common) data value; zeroed queries would be ambiguous with observed zeros.</li>
+      <li><strong>Point-forecast head, MAE loss</strong> (median-optimal; aligns with MASE's absolute-error shape). Quantile/probabilistic head deferred to v2 — GIFT-Eval MASE needs only point forecasts. Note: MASE = model MAE / context seasonal-naive MAE; the denominator is constant w.r.t. predictions (so MAE is the right loss shape) but varies per series ⇒ benchmark-aligned per-series loss weighting is open (O8).</li>
+      <li><strong>Dense auxiliary AR loss</strong>: small head on every context token predicting <em>its own channel's</em> next patch in value space (causal context per D5 makes this honest — every position is a forecast origin). Own-channel targets are forced by D4's permutation symmetry: there is no canonical "other channel" to target; cross-channel information still flows into the hidden state via attention — inputs are cross-channel, targets are own-channel. Weight λ ≈ 0.1–0.3. Targets are <em>locally re-anchored increments in step-vol units</em> (see D10) so loss sensitivity is uniform across positions and regimes.</li>
+    </ul>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">One-shot masked query tokens</td><td>One forward pass for any p ≤ p_max; no error accumulation; static shapes; segment = [context grid + queries], packs cleanly</td><td class="verdict"><span class="chip decided">decided</span></td></tr>
+      <tr><td class="opt">Causal next-patch AR rollout</td><td>Dense loss, unbounded horizon — but each step moves the forecast origin ⇒ full telescope re-tokenization per patch (clashes with D2), KV cache invalidated, slow inference, exposure bias</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Multi-patch heads on AR backbone</td><td>Each position predicts next k patches (TimesFM 32-in/128-out). Horizon frozen at k; far steps decoded from one hidden state without query-side attention; can't condition on known-future features. Subsumed by query tokens (= one token + attention per output patch)</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Iterative refinement / generative head</td><td>One-shot draft → few refinement passes, or diffusion/flow head for sampled trajectories. Jointly coherent sampled paths; pure head/inference change on an unchanged backbone</td><td class="verdict"><span class="chip deferred">future exploration</span></td></tr>
+      <tr><td class="opt">JEPA latent-prediction aux loss (+ SIGReg)</td><td>Predict latents of held-out spans via EMA target encoder; multimodality-friendly, richer representations — but adds a collapse failure mode and training complexity</td><td class="verdict"><span class="chip deferred">v2 / alternate</span></td></tr>
+      <tr><td class="opt">Quantile / probabilistic head</td><td>Not required for MASE point evaluation</td><td class="verdict"><span class="chip deferred">v2</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D7</span><span class="dtitle">Missing data: [NA] state distinct from [MASK]</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p>Three content states per token position: <strong>observed</strong> (tier encoder over values), <strong>[MASK]</strong> (learned query embedding — "value exists in the future, predict it"), <strong>[NA]</strong> (learned missing embedding — "no observation here"). The two masks must not be conflated: they carry opposite semantics.</p>
+    <ul>
+      <li><strong>Partial missingness within a patch</strong>: every tier encoder takes two input channels per timestep — value (NaN→0) and a 0/1 observed-indicator — so a true zero is distinguishable from a filled missing value, and the encoder learns to aggregate around holes.</li>
+      <li><strong>Fully missing patch</strong> → [NA] content embedding (+ usual time/span/channel/role embeddings).</li>
+      <li><strong>Grid stays rectangular</strong>: dropping missing tokens (allowed in principle by the set formulation) would break column alignment for lag bands and static shapes — rejected. [NA] placeholders preserve both.</li>
+      <li><strong>Loss masking</strong>: auxiliary next-patch loss skipped where the target patch is (mostly) missing; horizon loss skipped on NaN ground truth. Same per-position <code>valid</code> side-tensor mechanism as packing's boundary mask.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D8</span><span class="dtitle">Packed buffer layout: channel-major serialization</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p>Attention kernels (SDPA / FlashAttention / FlexAttention) operate on one sequence axis — the 2-D grid must be serialized; only the <em>order</em> is a design choice. Each sample's grid is laid out <strong>channel-major</strong>: <code>[ch0: t0..tN | ch1: t0..tN | … | queries]</code>, position(c,t) = base + c·N + t. Samples are concatenated as segments in a fixed-length buffer (1-D packing semantics, D-side tensors: sample_id, channel_idx, t_center, span, role, content_state, valid).</p>
+    <p>Under dense causal attention (D5 v1), <strong>attention FLOPs are layout-independent</strong> (both orders compute the same causal triangle in time). Channel-major is chosen for everything else: the dense AR aux-loss target (D6) is a shift-by-one gather within a contiguous row; tier-encoder writes and per-channel readouts are stride-free; horizon queries group cleanly; and phase-2 selection blocks align with channel semantics (A4 below).</p>
+    <p><strong>Hard implementation rule — no buffer-index positional encoding anywhere.</strong> The buffer index is a storage address, not a feature: all token geometry must come from side tensors (continuous time embedding on t_center; relative attention biases computed from t_q − t_k; channel identity per D4; span per D1). Attention + per-token FFN are permutation-equivariant given these tags, so serialization order has <em>zero</em> effect on the computation or on learnability (cf. MAE encoding randomly-ordered patch subsets via position embeddings alone; packed LLM pretraining with per-document position reset). Applying stock RoPE / learned absolute embeddings over the packed sequence index — the default in LLM codebases — would scramble semantics under packing and shifting contexts, and is the single most likely implementation bug in this design.</p>
+    <p><strong>Measured tile accounting</strong> (exact mask enumeration at production ratios N/B = 10, scaled B=16, N=160; verify at full scale with FlexAttention BlockMask profiling before launch):</p>
+    <table>
+      <tr><th>Config</th><th>Tiles computed</th><th>Util in computed tiles</th><th>FLOPs / useful pair</th></tr>
+      <tr><td>C=4 (C&lt;B) · CM element-bands</td><td>628 / 1,600</td><td>48.6%</td><td>2.06×</td></tr>
+      <tr><td>C=4 · CM block-granular</td><td>640 / 1,600</td><td>88.3%</td><td>1.13×</td></tr>
+      <tr><td>C=4 · TM element-bands</td><td>820 / 1,600</td><td>37.2%</td><td>2.69×</td></tr>
+      <tr><td>C=32 (C&gt;B) · CM element-bands</td><td>35,488 / 102,400</td><td>28.7%</td><td>3.48×</td></tr>
+      <tr><td>C=32 · CM block-granular</td><td>36,480 / 102,400</td><td>86.8%</td><td>1.15×</td></tr>
+      <tr><td>C=32 · TM element-bands</td><td>30,194 / 102,400</td><td>33.8%</td><td>2.96×</td></tr>
+    </table>
+    <p class="note">Useful per-tile own-row pair formula (time-major): pairs = channel-overlap × (#query times in block) × (#key times in block) = B²/min(C,B) in aligned tiles, 0 in misaligned ones; B²/C is only the average. Forced-open tiles at C&lt;B run at 1/B utilization.</p>
+    <p><strong>Assumption register — what the layout choice leans on, and what breaks if wrong:</strong></p>
+    <ul>
+      <li><strong>A1 — Kernel block granularity B ≈ 128</strong> (FlexAttention BlockMask default; FA2/FA3 tiles 64–128). <em>If wrong</em> (future kernels efficient at B=16–32): time-axis block sparsity regains room even at N/B=10 → re-run the dense-vs-bands tradeoff.</li>
+      <li><strong>A2 — Training C ≤ 32 ≪ B; N ≈ 1280 (N/B ≈ 10)</strong>. Makes dense affordable and fixed bands pointless (log centers collapse into ~6 of 10 block offsets). <em>If wrong in C</em> (mix shifts to C ≳ 100): dense grows ∝C² — pull phase 2 forward; at C ≥ B, TM block semantics change entirely. <em>If wrong in N</em> (telescope budget grows to 5–10k): dense grows ∝N² — time-axis sparsity (bands or NSA along own-row) returns.</li>
+      <li><strong>A3 — Dilution bet</strong>: the model learns to focus over up to ~40k keys without hard masks, helped by D4 ID routing and the optional log-lag score bias. The bias is an additive logit term (a FlexAttention <code>score_mod</code>) computed from side tensors — e.g. b = β·𝟙[same channel] + Σ w_m·φ_m(Δt) with log-spaced lag bumps φ_m; a hard mask is the limit of an infinitely strong bias, so "strength" is a continuous dial. <em>If wrong, escalate the ladder</em>: <strong>(1) magnitude</strong> — initialize same-channel offset and near-lag bumps large (+2–4 logits) so step-0 attention is near channel-independent/local; learnable coefficients relax where data justifies; <strong>(2) structure</strong> — per-channel-pair low-rank lag kernel b += Σ α_m(u_{c_q},u_{c_k})·φ_m(Δt), α from D4 content embeddings (precomputed C×C×M table per sample); <strong>(3) gating</strong> — zero-init learned per-head gate on the cross-channel pathway (ReZero/Flamingo style): exactly channel-independent at init, cross-channel flow admitted under gradient pressure — robust to noisy early QK logits; <strong>(4) annealing</strong> — start strong, decay the prior over early training (composes with the D5 layer mask schedule); then pull NSA forward. Diagnostics that trigger escalation: per-head attention entropy pinned near log S; own-channel mass stuck at ~1/C or ~1; a synthetic probe with a planted lag-k white-noise feature→target dependency failing to beat the channel-independent baseline. Element bands are not a fallback (table above).</li>
+      <li><strong>A4 — NSA relevance-structure hypothesis (layout-critical)</strong>: cross-channel relevance is <em>channel-selective</em> (specific driver channels at specific eras / lead-lag structure), not synchronously global. A CM selection block = "channel c′, time-era b" — one selected block is dense in relevant content, composes with D4 route-by-ID, and own-history era selection only exists as a coherent block in CM. <em>If wrong</em> — if relevance is dominated by <em>synchronous events</em> (common shocks where the joint cross-channel snapshot matters): a TM block captures the event in 1 selection slot while CM needs up to C slots — at fixed top-k, CM starves the selection budget. That is the concrete failure mode that would favor time-major or a hybrid.</li>
+      <li><strong>A5 — Reversibility</strong>: layout is a buffer permutation, not architecture. Switching CM↔TM, or re-serializing between stages (CM backbone + TM-gathered views for an event-selecting NSA stage), is a gather costing memory bandwidth, zero math. A wrong A4 is a refactor, not a redesign.</li>
+      <li><strong>A6 — One-shot decoding assumed (no KV-cache pressure on layout)</strong>: under D6's one-shot decoding and D2's origin-anchored telescope, caches are invalidated by re-tokenization, so layout has no caching implications. <em>If decoding ever becomes incremental/streaming</em>: time-major appends new timesteps at the buffer end (stable prefix, cache-reusable) while channel-major inserts into every row (cache dead) — this analysis reopens.</li>
+    </ul>
+    <p class="note"><strong>Hedge under A4 (planned escape if both structures matter):</strong> the two structures aren't mutually exclusive in reality (markets have both lead-lag drivers and common shocks). If evidence demands both, the design answer is two selection groups — some heads select CM channel-era blocks, others select synchronous windows via a strided/secondary view — rather than a layout flip; NSA's grouped selection accommodates that. Logged as a candidate further update to the model if needed.</p>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">Channel-major</td><td>Contiguous channel rows: aux-loss shift, encoder/readout gathers, query grouping, NSA channel-era selection units</td><td class="verdict"><span class="chip decided">decided</span></td></tr>
+      <tr><td class="opt">Time-major</td><td>Near-stock causal mask and contiguous same-time locality; but per-channel ops become stride-C_i gathers, blocks conflate channels (no per-channel selection unit for phase 2). Competitive on raw FLOPs in some band regimes — rejected on per-edge efficiency and engineering, not on a "catastrophic" claim</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">2-D / non-flattened packing</td><td>No production kernel takes a grid natively; batch-axis tricks forbid cross-channel attention. Flattening is mandatory; only the order is free</td><td class="verdict"><span class="chip rejected">infeasible</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D9</span><span class="dtitle">Packing pipeline: mask truth table, window sampling, streaming packer, cost-bucketed scheduling</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p><strong>1 · Mask truth table.</strong> Side tensors per position: <code>s</code> (sample_id), <code>c</code> (channel), <code>t</code> (time), <code>role ∈ {ctx, qry}</code>. Attention q→k allowed iff:</p>
+    <p><code>s[q]==s[k] AND ( (role[k]==ctx AND (role[q]==qry OR t[k]&lt;=t[q])) OR (role[k]==qry AND role[q]==qry) )</code></p>
+    <p class="note">ctx→ctx: time-causal, channel-blind (dense, ≤ includes same-time and self) · qry→ctx: always · qry→qry: always (trajectory coherence, bidirectional — query tokens carry no input information, so no causality needed) · ctx→qry: never (context representations independent of attached horizon). Pad positions get s = −1 plus a q==k self-attend exception (NaN guard; outputs discarded). BlockMask built once per batch on GPU and reused across all layers (mask is depth-invariant in v1).</p>
+    <p><strong>2 · Window sampling</strong> (per raw series [T_raw, C]): sample horizon p (variable-p, D6) → Q = n_targets·⌈p/patch⌉; per-channel token allowance <strong>n = ⌊(L_pack − Q)/C⌋</strong>; raw coverage T_cov = telescope-coverage(n) (invert the D2 ladder); forecast origin sampled <strong>uniformly</strong> over valid positions; context = up to T_cov steps ending at the origin. Long series yield multiple crops per epoch across all their regimes. Segment size S = C·n_used + Q is known from the spec alone (no tokenization needed to pack). Consequence recorded: channel count and temporal depth trade off by construction under a fixed buffer (C=128 ⇒ shallow context); deep telescopes are trained via solo buffers (univariate / low-C samples can fill L_pack alone).</p>
+    <p><strong>3 · Streaming packer.</strong> Source mixture (weighted) → window sampler emits segment specs → <strong>reservoir of K ≈ 1000 specs</strong> (doubles as shuffle buffer) → <strong>best-fit decreasing</strong>: repeatedly place the largest spec that fits the open buffer's remaining length; emit when nothing fits or residual &lt; tolerance; pad tail (s=−1); refill reservoir. Length is the <em>only</em> packing constraint. Large samples occupy solo buffers; packing exists purely to stop small-sample padding waste (expected tail waste: low single-digit %). CPU workers tokenize and assemble chosen specs; every buffer is exactly [L_pack] + side tensors ⇒ one compile graph, composition varies as data.</p>
+    <p><strong>4 · Cost-bucketed step scheduling.</strong> Buffer cost = Σᵢ S_i²/2 attention pairs, known from specs. Per-token attention ≈ 4d·S vs FFN ≈ 12d² ⇒ parity at S ≈ 3d (≈768 tokens @ d=256); a solo 64k buffer ≈ 2×10⁹ pairs vs ~3×10⁷ for a packed-small buffer — ~40–60× spread at identical shape. Remedy: a scheduler window (64–256 buffers) sorts by cost and forms each global step from similar-cost buffers across ranks — giants travel together in occasional slow steps, no straggler tax, shapes unchanged. Caveat recorded: solo-buffer steps carry few samples (sometimes one) ⇒ keep giant-step frequency in mind when weighting the data mixture (a full-depth multichannel series has outsized per-occurrence gradient influence).</p>
+    <p><strong>5 · Loss gathers.</strong> Aux next-patch target of position p = raw patch behind p+1; valid iff s[p+1]==s[p] AND c[p+1]==c[p] AND span[p+1]==span[p] (skip ~4 tier-boundary positions per row) AND target patch sufficiently observed (D7). Horizon readout = precomputed index_select over query positions; predictions scatter to (s, c, horizon step); NaN ground truth dropped via valid bits.</p>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">Cost-bucketed scheduling</td><td>Handles cost heterogeneity downstream of packing; packer stays pure-utilization</td><td class="verdict"><span class="chip decided">decided</span></td></tr>
+      <tr><td class="opt">B_cost as a packing constraint</td><td>Σ S_i² ≤ B_cost during placement. Setting recipes recorded: worst-solo tie (β²/2), attention:FFN ratio (α·3d·L_pack), empirical p90. Demoted — bucketing supersedes it; optionally kept as a sanity ceiling</td><td class="verdict"><span class="chip deferred">demoted / optional</span></td></tr>
+      <tr><td class="opt">Per-sample token cap β_seg &lt; L_pack</td><td>Unnecessary: a big sample takes a solo buffer; the cap would silently forbid deep telescopes for multichannel data</td><td class="verdict"><span class="chip rejected">rejected (β_seg = L_pack)</span></td></tr>
+      <tr><td class="opt">Channel subsampling when C is large</td><td>Never drop channels <em>when serving a task</em> — covariates removed is information destroyed, targets removed is the task destroyed; always cut in time. Scope (per D13): training-crop <em>construction</em> may subset channels when manufacturing samples from large multivariate sources</td><td class="verdict"><span class="chip rejected">rejected at task time</span></td></tr>
+      <tr><td class="opt">Truncate context to most recent steps</td><td>Replaced by uniform random-origin window sampling — trains on all periods/regimes of each series, makes variable-p non-degenerate</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D10</span><span class="dtitle">Normalization: per-channel anchored-arcsinh (reversible), locally re-anchored losses</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p><strong>Input representation</strong> (per channel, per sample, context statistics only): <code>z = arcsinh((x − a)/σ_Δ)</code> with <strong>a = median(last 32 raw steps)</strong> (anchor window 8–16 is a tuning point for steep trends — the last-32 median visibly lags) and <strong>σ_Δ = 1.4826·median|Δx|</strong> with fallback chain: if 0 → mean|Δx| (intermittent/quantized) → level-IQR/1.349 → 1 (genuinely constant series degrade gracefully to all-zeros); plus relative floor σ_Δ ≥ 10⁻³·IQR/1.349. Constants 1.4826 and 1.349 are Gaussian consistency factors (MAD = 0.6745σ; IQR = 1.349σ) so all robust scales estimate the same σ. Exact inversion <code>x = sinh(z)·σ_Δ + a</code> denormalizes horizon predictions; no leakage. Normalize first, then aggregate coarse tiers (per D3); coarse tiers carry their own <strong>per-tier σ_Δ</strong> (robust median |Δ| of the tier-aggregated sequence).</p>
+    <p><strong>Rationale (verified by stress test, 8 synthetic series types)</strong>: normalization allocates a finite resolution budget along the series; z-score/RevIN spends it at the context mean level — for trending series, the <em>middle of history</em> — leaving the forecast-relevant recent dynamics in a sliver (regime-jump case: recent window occupies 1% of the representation range; loss sensitivity to a one-step-vol error at the horizon: 0.0015 vs 0.139 anchored — up to ~90× difference; 13× on GBM trend, 5.8× on random walks). Anchored-arcsinh spends resolution at the current level and the horizon, log-compressing the past gradually (slope 1/|z|) — the value-space twin of the telescope. |z| > 2 in old context is by design, not a defect: arcsinh stays monotone and exactly invertible everywhere.</p>
+    <p><strong>Known weaknesses (recorded)</strong>: (a) no advantage on stationary series (schemes equivalent there); (b) less fine old-history detail than z-score on trending series (mitigated by D2's telescope coarsening old history anyway); (c) smooth seasonal series with amplitude ≫ step-vol get peak compression (|z|≈4 at cycle tops) — mitigation if needed: blended scale s = max(σ_Δ, λ·IQR of last cycle), ablatable.</p>
+    <p><strong>Losses are locally re-anchored</strong> (fixes a real interaction with D6): in global z-space, old positions on non-stationary series sit where slope ≈ 1/|z| is tiny, making the dense AR aux loss blind there — the "every position is a forecast origin" property would silently collapse to recent origins. Fix: every prediction target — aux and horizon — is <em>movement from the prediction point's local level in step-vol units, arcsinh-compressed</em>: aux target at position t = arcsinh((x_{t+1..t+P} − level_t)/σ_Δ^{tier}); horizon target = arcsinh((y − a)/σ_Δ) (identical form; a <em>is</em> the origin's local level). Uniform loss sensitivity at every position in every regime; global anchored z remains the input representation. Loss space: normalized (equal per-sample influence); arcsinh-space MAE default, vol-unit-space (sinh-inverted) as ablation — arcsinh-space down-weights large moves which MASE does not forgive.</p>
+    <p><strong>Cross-channel scale receipts</strong>: per-channel normalization destroys real relationships ("channel A is 100× channel B"); re-inject per-channel summary features (log σ_Δ, log|a|-relations, fallback-tier flag) into the D4 content embedding.</p>
+    <p><strong>Experiment hedge (mandated) — all schemes behind one-line config toggles.</strong> Implement normalization as two independent config axes so any combination is a single-line training-config change, no code edits: <code>input_norm ∈ {anchored_arcsinh (default), zscore_arcsinh}</code> and <code>loss_target ∈ {locally_reanchored (default), global_norm_space}</code>, plus <code>loss_space ∈ {arcsinh (default), vol_units}</code>. All combinations must run. Rationale for the toggle requirement: the locally re-anchored targets are visually noise-dominated (most of a 1-step increment is irreducible — true of next-token LLM losses too, and patch-level P=32 targets have better signal-to-noise), but if they prove hard to learn in practice the fallback to global-space loss targets must cost one line. Decide by validation MASE on the real mixture; anchored vs z-score input is the headline ablation (z-score = field-standard control). Synergy noted: σ_Δ scaling makes per-sample normalized MAE ≈ MASE-aligned (the MASE denominator is the naive forecaster's step error) — partially resolves O8.</p>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">Anchored-arcsinh</td><td>Recency-weighted resolution; loss geometry matches forecasting + MASE on non-stationary data; sign/zero-safe; exactly reversible</td><td class="verdict"><span class="chip decided">decided (default)</span></td></tr>
+      <tr><td class="opt">Context z-score / RevIN</td><td>RevIN = reversible instance z-score + per-channel-index affine. Rejected as specified: level-based μ/σ are trend-dominated (stress test); the affine needs a channel vocabulary we don't have. Its reversal skeleton is exactly what D10 implements with different statistics. Kept as the mandated ablation control</td><td class="verdict"><span class="chip deferred">ablation control</span></td></tr>
+      <tr><td class="opt">Median/IQR statistics</td><td>Fixes outliers, not trend — robust location/scale of a trending window are spanned by the trend like moments are. Robustness absorbed into D10 via median-based anchor and σ_Δ</td><td class="verdict"><span class="chip rejected">rejected as primary</span></td></tr>
+      <tr><td class="opt">Per-channel levels-vs-log branching</td><td>Stationarity detector → discrete transform choice. Right target, wrong mechanism: boundary flapping between crops, positivity requirement, mode flag to learn. arcsinh subsumes it continuously (≈linear for stationary, ≈log for exponential growth)</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">First-value / full-context-median anchor</td><td>Both anchor the past: recent tokens drift into the log region — backwards. Recency is the point of anchoring; robust ≠ recent</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D11</span><span class="dtitle">Feature/target roles: embedding, no hard masks, light role augmentation</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <ul>
+      <li><strong>Role embedding</strong>: one learned embedding, role ∈ {target, feature}, added at input on every token. Two states suffice — "known-future feature" (KFF) is distinguished by its time embedding (t &gt; origin), not a third role.</li>
+      <li><strong>No role-based hard masking</strong>: asymmetric schemes (features attend only features, etc.) contradict the D5 dense philosophy and save no meaningful FLOPs. If role asymmetry matters, it enters as a <strong>role-pair score bias</strong> b(role_q, role_k) — four learned scalars per head, a natural extra rung on the D8/A3 ladder.</li>
+      <li><strong>KFF tokens need zero new machinery</strong>: a KFF is an observed (ctx-role) token at a horizon timestamp. The D9 truth table already handles it: context can't attend it (causality), queries attend it (qry→ctx), it attends its causal past, never attends queries. Queries reading KFF at the <em>same</em> horizon timestamp (Δ=0 cross-channel edge) implement cross-sectional regression — e.g., forecasting one treasury tenor from other tenors at the same date, where features are unpredictable from their own past but informative contemporaneously (the use case that motivated direct cross-channel edges in D5).</li>
+      <li><strong>Aux loss applies to all channels including features and KFF horizon tokens</strong>: own-dynamics supervision is what teaches the model to read features; unpredictable features simply yield noise-floor aux terms (harmless, informative about unpredictability).</li>
+      <li><strong>Role designation policy</strong>: (1) datasets with native role labels (GIFT-Eval past/future feature columns; custom feature-dependent datasets) pass through as labeled; (2) all-target multivariate datasets (the GIFT-Eval majority) stay all-target by default; (3) <strong>light role augmentation</strong> so the feature role isn't undertrained: with crop-level probability q ≈ 0.2 (tunable), demote each channel to feature w.p. ~0.5 keeping ≥1 target; each demoted feature reveals its horizon (becomes KFF) w.p. ~0.5. Most data stays as intended — augmentation exists only to train the role machinery and manufacture feature→target supervision from unlabeled data (per D4's data requirement). Exact q / demotion / reveal rates are O6 mixture tuning points.</li>
+      <li><strong>Custom feature-dependent datasets</strong> (cross-sectional structure: rate curves, lead-lag pairs) are an explicit O6 data-construction item — they are the primary training signal for the KFF path and D4 routing.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D12</span><span class="dtitle">Telescope schedule: patch vocabulary, allocation policy, design point, context expansion</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p><strong>Patch-size vocabulary (fixed): {4, 8, 16, 64, 256, 512}</strong> — six per-tier encoders (D3), six per-tier σ_Δ statistics per channel (D10). The vocabulary is fixed so encoders are shared across all samples; only per-tier token <em>counts</em> vary (counts are data, not shape).</p>
+    <p><strong>Design point (C=21, L_pack=1024)</strong>: counts [8, 8, 8, 8, 8, 4] = 44 tokens/channel → coverage 32+64+128+512+2048+2048 = <strong>4,832 steps/channel</strong>; context 924 tokens + 84 query tokens (output patch <strong>16</strong>, 4 queries/channel) = 1,008 ≤ 1,024. Resolution profile: last 32 steps at patch-4, ~220 steps at ≤16. <strong>Single-pass horizon at full C=21: 64 steps/channel</strong>; longer horizons via iterative 64-step chunks (predict → append → re-anchor telescope → repeat; ~12 passes for a 720-step horizon — acceptable: only 15/97 GIFT-Eval datasets exceed 720, point forecasts only). These are the C=21 instances of the general D9 budget formula — a univariate sample at the same L_pack gets both deeper context and a much longer single-pass horizon.</p>
+    <p><strong>Allocation policy</strong> (parametric in n tokens/channel and T_raw): halving prior (finest tier gets ~half the tokens, halving down the ladder) → compute coverage → rebalance: coverage &gt; T_raw ⇒ walk tokens coarsest→finest until coverage ≈ T_raw (short series become mostly patch-4); coverage short even with coarse tiers maxed ⇒ the D9 window sampler has already cropped. Deterministic, integer ops per sample.</p>
+    <p><strong>Context expansion 1024 → 2048: double per-tier counts to [16, 16, 16, 16, 16, 8]</strong> (coverage 9,664/channel at C=21). Works because: zero new parameters (same vocabulary ⇒ same encoders/span embeddings); no positional territory to extend (D8 no-buffer-index rule; t_center ages are already trained by solo univariate buffers reaching tens of thousands of steps at L=1024). What shifts is adaptation-scale only: more keys per query, doubled worst-case attention (D9 scheduler absorbs), changed count distributions ⇒ short fine-tune from the 1024 checkpoint. Alternative expansion axes recorded: (a) asymmetric reallocation — spend new budget on finer recency at same coverage (empirical fork, leave open); (b) vocabulary extension with a new coarser patch (×2048/×4096) for more coverage — adds one fresh encoder needing brief training, the more expensive lever.</p>
+    <table>
+      <tr><th>Option</th><th>Notes</th><th>Verdict</th></tr>
+      <tr><td class="opt">Vocabulary {4..512}, counts [8,8,8,8,8,4], out-patch 16</td><td>4.8k coverage/channel at C=21 within 1024; fine front (patch-4 recency)</td><td class="verdict"><span class="chip decided">decided</span></td></tr>
+      <tr><td class="opt">Coarser scheme: min patch 8, output patch 64–128</td><td>Would fit 16k×21 with 900-step single-pass horizons, but too coarse in both context and prediction; rejected for resolution</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Original ×1 tier (per-step tokens)</td><td>Designed for the n=1280 single-channel world; indefensible at n≈44 — patch tokens preserve per-step values through learned encoders (TimesFM/Chronos-2-class models are patch-only)</td><td class="verdict"><span class="chip rejected">rejected</span></td></tr>
+      <tr><td class="opt">Seasonal-phase fine windows</td><td>Extra fine tokens at ACF-detected period lags; additive (tagged tokens, no architecture change); dense attention + content matching covers seasonality at patch granularity meanwhile</td><td class="verdict"><span class="chip deferred">v2</span></td></tr>
+      <tr><td class="opt">Coarse-patch detail vs d_model</td><td>A ×512 patch through d_model keeps level/trend/vol/shape, loses fine internal structure — accepted contract; ablations if it binds: explicit within-patch stats appended (D3), or 2 tokens per coarsest patch (mean/shape + extremes)</td><td class="verdict"><span class="chip deferred">noted / ablation</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D13</span><span class="dtitle">Data strategy: GIFT-Eval-targeted corpus, two-phase schedule, test-tracked training</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <p><strong>Corpus</strong>: (A) GIFT-Eval Pretrain — 88 datasets (71 univariate, 17 multivariate), ~4.5M series, ~230B points, 13 frequencies, non-leaking backbone; (B) the <em>train split</em> of GIFT-Eval TrainTest (~144k series) — legal in-distribution gold, used by current leaderboard models (Moirai 2.0 precedent); (C) Mystic-B multivariate KernelSynth — variates built from 3–4 kernels sampled out of a shared 7-kernel bank, so channels correlate through latent factors (the factor-model prior as <em>data</em>; primary cross-channel training signal; knobs: bank size, kernels/variate, overlap degree, C distribution); (D) optional filler: univariate KernelSynth + Chronos-Mixup. Lead-lag covariate datasets explicitly deferred — the architecture is capable (D5/D11), GIFT-Eval doesn't need them.</p>
+    <p><strong>Mixture weights</strong>: effective weight = manual multiplier × size^α (α ≈ 0.3–0.5, per-dataset caps; never proportional-to-size). Config map <code>dataset_weights: {id: multiplier}</code>; <strong>multiplier 0 removes a dataset and runtime renormalization over the surviving set redistributes its mass automatically</strong> (also covers locally-unavailable datasets). Synthetic share ~10–15% total, config-exposed.</p>
+    <p><strong>Two-phase schedule, single run, restartable</strong>: Phase 1 — broad pretrain on A+C+D with B at natural weight. Phase 2 (last ~10–20% of steps, <code>phase2_start</code> in config) — anneal: upweight B and switch the crop sampler to <strong>test-matched marginals derived automatically from the 97-config table</strong> (horizon set incl. ×10/×15 extensions, context lengths, channel counts, frequency marginals; <code>phase2_crop_distribution: auto_from_test_configs</code>, manual override allowed). Checkpoint discipline: periodic checkpoints + <strong>mandatory end-of-phase-1 checkpoint</strong> (model + optimizer + dataloader state); phase 2 is always re-runnable from it with a tweaked config and a re-warmed LR — iterating the anneal costs 10–20% of a run, not 100%.</p>
+    <p><strong>Crop/shape distribution</strong> (D9 sampler parameters): log-uniform horizon p within each sample's budget (phase-2 reweighted to test horizons); random origins; deliberate long-crop sampling from long series so coarse tiers and deep t_center ranges train (the D9 giant-step frequency knob lives here); temperature-balanced frequencies so rare ones aren't starved.</p>
+    <p><strong>Multivariate construction</strong>: native multivariate datasets cropped as random channel subsets of 2–21 — this is <strong>training-crop manufacturing and is explicitly in scope</strong> (the "never drop channels" rule of D9 governs task serving/inference, where the task defines C and only time may be cut; constructing training samples from a 370-channel source by subsetting is legal and necessary). Plus, at low rates: <em>related bundles</em> (timestamp-aligned series from the same univariate dataset — genuine cross-sectional correlation: traffic sensors, electricity clients) and <em>unrelated bundles</em> (cross-dataset channel salads — dilution-robustness training: learn to ignore useless channels). D11 role augmentation (q ≈ 0.2) applies on top.</p>
+    <p><strong>Hygiene</strong>: dedup across A and B (LOTSA-descended overlap risk); min-length filter; NaN-fraction cap (~90%); constant series kept (D10 degrades gracefully and they occur in test).</p>
+    <p><strong>Monitoring</strong>: <strong>train-split validation windows are the primary signal</strong> — all architecture and ablation decisions (normalization toggles, mixture weights, A3 ladder escalation) are made on them. The GIFT-Eval <strong>test split is tracked for record only, never for decisions</strong>: periodic test loss and true-formula MASE on a <strong>deterministic shard of the first 100 windows per config</strong> (shrinkable for speed) — cheap because the seasonal-naive denominator is context-only and precomputed once per series; full official GluonTS harness at every saved checkpoint as ground truth (reconcile the in-training proxy against it once).</p>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D14</span><span class="dtitle">torch.compile mechanics: one static graph, FlexAttention, grouped tier dispatch</span><span class="chip decided">decided</span></div>
+  <div class="dbody">
+    <ul>
+      <li><strong>One static graph by construction</strong>: every batch is [B, L_pack=1024] tokens + fixed-shape side tensors; all per-sample variability (segment count, tier counts, query positions) is tensor <em>contents</em>, never shapes — no <code>mark_dynamic</code>, no recompiles. Packing, reservoir, window sampling, allocation, normalization statistics, and crop-time weights run on CPU dataloader workers, outside the graph. Compile the full training step. The 1024→2048 expansion (D12) is one fresh compile at a new static shape, not dynamism.</li>
+      <li><strong>Attention: FlexAttention from the start</strong> — D9 truth table as <code>mask_mod</code> (BlockMask built once per batch on GPU; at S=1024 / 8×8 blocks the construction cost is noise), with <code>score_mod</code> as the ready socket for the A3 bias ladder and the phase-2 NSA migration path. Rejected alternative: plain SDPA with a materialized [1024×1024] bool mask per buffer — works at this scale but forces a kernel migration the moment biases or learned sparsity activate.</li>
+      <li><strong>Per-tier encoder dispatch (MoE-style grouped)</strong>: six encoders with different raw input widths (4…512) cannot be one op, and data-dependent Python branching would graph-break. At pack time the CPU emits per-tier index tensors with <strong>static capacities</strong> (cap_k per buffer from the D12 allocation bounds + headroom, padded, asserted); in-graph: gather → [cap_k, patch_k] encode → scatter into [B, 1024, d]. Six fixed-shape gathers/scatters, fully compileable, negligible padding waste. Rejected: pad every patch to 512 for one span-conditioned encoder — ~128× memory on fine tiers, contradicts D3.</li>
+      <li><strong>Loss gathers</strong>: query readout and aux-target indices precomputed per batch as fixed-size padded index tensors + valid masks; in-graph <code>gather</code>/<code>index_select</code> only.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="decision">
+  <div class="dhead"><span class="dnum">D15</span><span class="dtitle">Seasonal-naive loss weighting</span><span class="chip deferred">deferred (v2)</span></div>
+  <div class="dbody">
+    <p><strong>Decision: postpone — no further loss complexity in v1.</strong> Recorded proposal for when it's picked up: multiply each sample's loss by w = σ_Δ / (seasonal-naive MAE on context at the ACF-detected period), precomputed at crop time in the CPU workers (one ACF + one naive pass), behind a config toggle <code>loss_weighting ∈ {none (default), seasonal_naive}</code>, decided by train-split validation MASE. Rationale for deferral: D10's σ_Δ scaling already aligns per-sample loss with naive-1 MASE; the residual gap to the <em>seasonal</em> denominator is small; period detection is noisy on short contexts (added variance); and test MASE is directly tracked anyway (D13).</p>
+  </div>
+</div>
+
+<h2>Open queue</h2>
+<p>Empty — all items resolved into D1–D15. The spec is implementation-complete for v1.</p>
+
+<h2>v2 / deferred backlog</h2>
+<div class="openitem"><span class="qn">V1</span><div class="qt"><b>NSA-style learned block selection</b><span>Phase-2 sparsity for large-C training samples and inference efficiency; selection over CM channel-era blocks (D5, D8/A4); two-selection-group variant if both lead-lag and synchronous-event structure matter (D8 hedge).</span></div></div>
+<div class="openitem"><span class="qn">V2</span><div class="qt"><b>JEPA latent-prediction aux loss + SIGReg</b><span>Latent targets for held-out spans via EMA encoder; multimodality-friendly representations; collapse-control via SIGReg (D6).</span></div></div>
+<div class="openitem"><span class="qn">V3</span><div class="qt"><b>Probabilistic outputs</b><span>Quantile head; iterative refinement / diffusion-flow head for coherent sampled trajectories (D6).</span></div></div>
+<div class="openitem"><span class="qn">V4</span><div class="qt"><b>Telescope refinements</b><span>Seasonal-phase fine windows at ACF-detected period lags; asymmetric 2048 reallocation vs count-doubling; vocabulary extension with coarser patches; coarse-patch stats augmentation / 2-token coarse patches (D12).</span></div></div>
+<div class="openitem"><span class="qn">V5</span><div class="qt"><b>Normalization refinements</b><span>Seasonal blended scale s = max(σ_Δ, λ·IQR of last cycle); anchor-window tuning for steep trends; vol-unit loss-space ablation (D10).</span></div></div>
+<div class="openitem"><span class="qn">V6</span><div class="qt"><b>Seasonal-naive loss weighting</b><span>Per-sample w = σ_Δ / seasonal-naive MAE behind a config toggle (D15).</span></div></div>
+<div class="openitem"><span class="qn">V7</span><div class="qt"><b>Lead-lag covariate datasets & cross-sectional construction</b><span>Planted lead-lag and rate-curve-style feature-dependent data — the training signal for D4 routing and the KFF path beyond GIFT-Eval (D11, D13).</span></div></div>
+
+<footer>
+  <span>tetris · decision log · rev 17</span>
+  <span>D: 15 decided · queue empty · v2 backlog: 7</span>
+</footer>
+
+</div>
+</body>
+</html>
