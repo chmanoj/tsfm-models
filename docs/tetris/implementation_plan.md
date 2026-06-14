@@ -173,6 +173,37 @@ vectors across layouts (training resamples freely). All four pre-training gates
   context-only items — training-loader contract unbroken. `EvalItem.naive_denom`
   stays `None`.
 
+**Distributed reconciliation (post-S13 — pinned, do not re-flag):**
+- **`test_distributed` spawns real gloo process groups** (`torch.multiprocessing.
+  spawn`, CPU) — decided over an in-process simulation. It asserts the O6
+  guarantees directly: disjoint+covering shards per rank, DDP-vs-single-process
+  per-sample loss identity, and checkpoint re-shard 2→3.
+- **Cross-rank cost scheduling needs no collective.** Each rank's
+  `StreamingReservoir` already cost-sorts its scheduler window (S11), so global
+  step `t` draws similar-cost steps on every rank by construction — the
+  "deterministic global cost-sorted schedule seeded identically" option, chosen
+  over an all-gather of per-buffer costs (which would couple the reservoir to the
+  process group). No new scheduler code in S13.
+- **DDP is wired+tested for real; FSDP is switch-only.** `wrap_model` selects on
+  `cfg.distributed.parallel`: DDP (`find_unused_parameters=True` so a buffer
+  lacking some tier's tokens doesn't trip the reducer; `device_ids` only on CUDA;
+  `torch.compile` applied by the caller *after* the wrap). FSDP is a recognized
+  branch wrapped only when selected **and** available — **not exercised on CPU CI**
+  (FSDP-on-CPU is fragile), same lazy posture as the GIFT-Eval download.
+- **Per-sample numerical identity is a forward/loss property, not a grad claim.**
+  No module/collator reads cross-rank or global state, so a fixed sample's
+  forward+loss is identical solo vs under a 2-rank DDP job (`test_distributed`
+  pins `|ddp − single| < 1e-5`); DDP only averages gradients. This extends the S9
+  pack-invariance keystone across ranks.
+- **Checkpoints (D13) persist per-rank reservoir state and re-shard.**
+  `save_checkpoint` writes one file per rank (model/optimizer identical across DDP
+  ranks; reservoir state rank-local). `load_checkpoint` restores model/optimizer
+  from the canonical rank-0 file always; if the saved `world_size` matches it
+  restores the rank-local reservoir **exactly** (S11 `state_dict`), otherwise it
+  **re-shards** — a fresh reservoir for the new `(rank, world_size)` refills from
+  its new disjoint shard. `rank_shard` is the deterministic round-robin partition
+  `StandInPretrainLoader` already uses. **S13 closes the build order (S0–S13).**
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).
