@@ -61,6 +61,11 @@ class Batch:
     horizon_target: torch.Tensor  # float32[B, L, P_out]  GT horizon (real only at QRY)
     target_valid: torch.Tensor    # bool   [B, L, P_out]  true only at QRY w/ non-NaN GT
 
+    def to(self, device) -> "Batch":
+        """Move all tensor fields to ``device`` (additive convenience for train)."""
+        from dataclasses import fields
+        return Batch(**{f.name: getattr(self, f.name).to(device) for f in fields(self)})
+
     @property
     def B(self) -> int:
         return self.sample_id.shape[0]

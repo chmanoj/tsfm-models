@@ -90,6 +90,25 @@ drawn), the **test pins a fixed basis** mapping each sample's channels to the sa
 vectors across layouts (training resamples freely). All four pre-training gates
 (S1, S2, S5, S9) + the required `test_aux_boundary` are green.
 
+**Train reconciliation (post-S10 — pinned, do not re-flag):**
+- **No-recompile gate is exercised locally via `torch.compile` + `CompileCounter`**
+  (decided: do it for real, not CUDA-only). `test_shakedown` compiles the model with
+  the eager `CompileCounter` backend + `dynamic=True`, runs varying-data steps, and
+  asserts the frame count is **flat after warmup** (D14 one-graph). Eager backend
+  avoids slow/flaky CPU inductor while still catching shape-guard recompiles.
+- **`step.py` hoists the variate basis out of the compiled forward** (eager QR) and
+  marks the only per-step-varying dims dynamic — `R` (`norm_values`/`observed`) and
+  `n_var` (basis) — so one graph serves all data. `train_step(forward, batch, basis,
+  opt, ...)`; `mark_dynamic_batch`; `make_basis`.
+- **Shakedown trivial path = one segment per buffer** (`pack([[s] for s in segs])`),
+  streaming `build_loader → sample_window → assemble → pack`. The reservoir path
+  (S11) reuses the same `pack`/`train_step`; only the grouping changes.
+- **ENV: project pinned to Python 3.13.10** (`.python-version`). Python **3.14**
+  breaks `torch.compile` — its functorch path imports `networkx`, which fails to
+  import on CPython 3.14.1 (a dataclass-`slots`/`__annotate__` change; `networkx`
+  3.6.1 is already newest). 3.13 is the stable ML target; revisit when the
+  3.14 toolchain catches up. `Batch.to(device)` added (additive) for device moves.
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).

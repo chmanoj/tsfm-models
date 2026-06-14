@@ -55,3 +55,9 @@ source-of-truth docs below.
 - `uv` for env/deps (`uv sync`); `pytest` for the gates (`uv run pytest`).
 - Run one test: `uv run pytest tests/test_<name>.py -v`.
 - Config is dataclasses ↔ YAML via OmegaConf (`configs/{shakedown,base}.yaml`).
+- **Python pinned to 3.13** (`.python-version`). Do **not** use Python 3.14 — it
+  breaks `torch.compile` (its functorch path imports `networkx`, which fails to
+  import on CPython 3.14.1). Revisit when the 3.14 toolchain catches up.
+- No-recompile (D14) is tested with `torch.compile(model, backend=CompileCounter(),
+  dynamic=True)` + `mark_dynamic` on the per-step-varying dims (`R`, `n_var`),
+  asserting a flat frame count after warmup — eager backend, so no CPU inductor.
