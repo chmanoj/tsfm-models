@@ -37,6 +37,32 @@ pack(buffers: list[list[AssembledSegment]], *, l_pack, p_out, num_buffers=None) 
 - **No `aux_target` Batch field.** Aux targets are gathered from `norm_values` at
   loss time (S8) — the collator carries only `valid_aux`.
 
+**Model reconciliation (post-S7 — pinned, do not re-flag):**
+- **Variate IDs (D4) are eager-QR, hoisted out of the compiled forward.**
+  `sample_orthonormal_basis(B, n_var, d)` builds a **per-buffer** orthonormal pool
+  (`[B, n_var, d]`, QR; L2-normalized-Gaussian fallback when `n_var > d`) — keeps
+  QR out of the graph (D14 no-recompile). Resampled per step in training, fixed
+  seed at inference. `Tetris.forward(batch, variate_basis=None, *, generator)`
+  samples internally when not supplied (standalone smoke), but a train step should
+  pass it in. `n_var = max(variate_uid)+1`; basis is per-buffer because
+  `variate_uid` is buffer-local-unique (collator), so the same id in two buffers is
+  two different variates.
+- **Per-tier encoders (D3) are uniform Fourier(value)+observed → 2-layer MLP.**
+  Each step: `[sin(vω),cos(vω)]` (log-spaced freqs) ⊕ observed bit; flatten the
+  `P_k` window; `Linear→GELU→Linear → d`. No appended summary stats in v1 (D3
+  "may append" — deferred). Same recipe all six tiers (only `P_k` differs).
+- **Dispatch (Stage 7) is fully static** (D14): per tier, a cumsum-rank +
+  `scatter_` into a `[CAP+1]` trash-binned buffer builds the `[CAP]` slot list;
+  windows gathered from the flat `norm_values` via `raw_start`; `index_add_`
+  scatters encoder outputs back (sentinel rows add 0). Routed = exactly
+  `content_state==OBSERVED`; `MASK`/`NA`/pad get learned `[MASK]`/`[NA]` vectors.
+- **Time embedding = Fourier(`t_center`) → linear** (own low-freq range,
+  wavelengths ~6..6000, since `t_center` spans ±thousands). span/role_ft are small
+  `nn.Embedding` tables. **Position is only `t_center`** (D8).
+- **Heads run dense over all L** (option-β): `horizon: d→P_out`, six `aux: d→P_k`;
+  selection/masking deferred to the S8 loss reduction. `tetris.forward` returns raw
+  head outputs (`ModelOutput{horizon, aux}`); loss + inversion are S8.
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).
