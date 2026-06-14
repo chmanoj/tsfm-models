@@ -12,7 +12,7 @@ checkpoint re-shard are S13.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -34,12 +34,20 @@ def run_training(
     model: Optional[Tetris] = None,
     generator: Optional[torch.Generator] = None,
     reservoir: Optional[StreamingReservoir] = None,
+    eval_loader=None,
+    eval_every: int = 0,
+    eval_log: Optional[List[Tuple[int, float]]] = None,
 ) -> List[float]:
     """Run up to ``steps`` train steps off the reservoir; return per-step loss.
 
     ``forward``/``model`` default to a fresh eager :class:`Tetris` (pass a compiled
     forward + its model to exercise the compiled path). Stops early if the loader
     drains before ``steps``.
+
+    Optional **record-only** eval (§6, S12): when ``eval_every > 0`` and an
+    ``eval_loader`` is given, the GIFT-Eval test loss is computed every
+    ``eval_every`` steps via the *shared* collator (context-only) and appended to
+    ``eval_log`` as ``(step, loss)`` — it never feeds the optimizer.
     """
     if model is None:
         model = Tetris(cfg).to(device)
@@ -68,4 +76,12 @@ def run_training(
             aux_weights=cfg.loss.aux_weights, loss_space=cfg.norm.loss_space,
         )
         losses.append(float(lb.total.detach()))
+
+        step = len(losses)
+        if eval_loader is not None and eval_every > 0 and step % eval_every == 0:
+            from ..data.eval_loader import evaluate_test_loss
+
+            tl = evaluate_test_loss(forward, eval_loader, cfg, device=device)
+            if eval_log is not None:
+                eval_log.append((step, tl))
     return losses

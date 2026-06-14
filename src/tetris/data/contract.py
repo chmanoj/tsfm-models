@@ -80,4 +80,25 @@ def build_loader(cfg, *, rank: int = 0, world_size: int = 1):
         from .standin_loader import StandInPretrainLoader
 
         return StandInPretrainLoader.from_cfg(cfg, rank=rank, world_size=world_size)
-    raise NotImplementedError(f"loader {name!r} is wired in a later stage (S12 for gifteval_test)")
+    raise NotImplementedError(
+        f"training loader {name!r} unknown; GIFT-Eval is record-only — use build_eval_loader"
+    )
+
+
+def build_eval_loader(cfg, *, local_dir: Optional[str] = None):
+    """Factory for the record-only eval loader (§6, S12), keyed by ``cfg.eval.loader``.
+
+    ``gifteval_test`` is the real GIFT-Eval download (O1; lazy/network — needs
+    ``local_dir``); ``synthetic_eval`` is the offline synthetic shard used by tests
+    and the shakedown. Both yield :class:`EvalItem`; ``EvalItem`` never enters the
+    training ``build_loader``/reservoir path (it is stripped via ``to_train_item``)."""
+    from .eval_loader import GiftEvalEvalLoader
+
+    name = cfg.eval.loader
+    if name == "gifteval_test":
+        if local_dir is None:
+            raise ValueError("gifteval_test needs local_dir (run gifteval_download first)")
+        return GiftEvalEvalLoader.from_download(cfg, local_dir=local_dir)
+    if name == "synthetic_eval":
+        return GiftEvalEvalLoader.from_synthetic(cfg, n_items=cfg.eval.shard_windows, seed=cfg.run.seed)
+    raise NotImplementedError(f"eval loader {name!r} unknown (use gifteval_test | synthetic_eval)")

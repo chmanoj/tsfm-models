@@ -142,6 +142,37 @@ vectors across layouts (training resamples freely). All four pre-training gates
   reservoir` flips the trivial S10 path (`shakedown.py`) to the reservoir path
   (`loop.run_training`); both call the same `pack`/`train_step`.
 
+**Eval reconciliation (post-S12 — pinned, do not re-flag):**
+- **Real GIFT-Eval download is a lazy, dependency-free seam.** `gifteval_download.
+  py` fetches `Salesforce/GiftEval` (HF dataset, gluonts arrow; repo id verified,
+  O1) via `huggingface_hub.snapshot_download` and splits test windows with the
+  official `gift_eval` package — **both lazy-imported, NOT in `pyproject` deps**.
+  The network path is never exercised in CI; `test_eval_loss` runs entirely on an
+  offline synthetic shard (`make_synthetic_eval_shard`). The 97-config table comes
+  from the downloaded tree (`_list_configs`).
+- **Held-out scoring reuses the frozen tokenizer at a fixed origin (no S4/S6
+  edits).** `eval_loader.eval_batch` rebuilds a training-style segment from
+  `cat(context, y_true)` with **origin pinned at the context boundary** and `p =
+  len(y_true)` (target rows get `y_true`; feature rows get NaN futures — they carry
+  no horizon tokens), then runs the unchanged `assemble`→`pack`→horizon head.
+  Query slots are `content_state == MASK` and the causal mask blocks context→
+  horizon, so `y_true` lands **only** in `horizon_target`, never the observed store
+  — same no-leakage guarantee as training. `eval_spec` mirrors `window_sampler`'s
+  budget math deterministically (no random origin/p, no KFF). Decided over a
+  duplicate eval-only `assemble`.
+- **`EvalItem` never enters the training path.** A separate `build_eval_loader(cfg)`
+  factory (`gifteval_test` = lazy download · `synthetic_eval` = offline shard)
+  returns the map-style `GiftEvalEvalLoader`; the training `build_loader` stays
+  Item-only. `to_train_item` strips the held-out fields before packing.
+- **Test loss is record-only (D13), MASE deferred (O4).** `evaluate_test_loss`
+  averages horizon MAE (Stage-9 normalized space, `metrics.horizon_test_loss`,
+  `@torch.no_grad`) over the first `eval.shard_windows` windows, one segment per
+  buffer, with the **inference variate basis fixed** (`basis_seed`, D4). It updates
+  no parameters. `loop.run_training` gained an additive, optional eval hook
+  (`eval_loader`/`eval_every`/`eval_log`) that fires the *same* collator on
+  context-only items — training-loader contract unbroken. `EvalItem.naive_denom`
+  stays `None`.
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).
