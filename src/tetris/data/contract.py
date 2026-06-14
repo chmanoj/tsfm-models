@@ -35,6 +35,7 @@ class EvalItem(NamedTuple):
     y_true: torch.Tensor                   # held-out horizon, [p, num_targets]
     naive_denom: Optional[torch.Tensor]    # seasonal-naive denominator; deferred (O4) -> None in v1
     config_id: str                         # which of the 97 GIFT-Eval configs
+    season_length: Optional[int] = None    # dataset-provided seasonality m for MASE (O4); None -> unknown
 
 
 def to_train_item(e: EvalItem) -> Item:
@@ -80,6 +81,10 @@ def build_loader(cfg, *, rank: int = 0, world_size: int = 1):
         from .standin_loader import StandInPretrainLoader
 
         return StandInPretrainLoader.from_cfg(cfg, rank=rank, world_size=world_size)
+    if name == "sanity":
+        from .sanity_loader import SanityTrainLoader
+
+        return SanityTrainLoader.from_cfg(cfg, rank=rank, world_size=world_size)
     raise NotImplementedError(
         f"training loader {name!r} unknown; GIFT-Eval is record-only — use build_eval_loader"
     )
@@ -101,4 +106,10 @@ def build_eval_loader(cfg, *, local_dir: Optional[str] = None):
         return GiftEvalEvalLoader.from_download(cfg, local_dir=local_dir)
     if name == "synthetic_eval":
         return GiftEvalEvalLoader.from_synthetic(cfg, n_items=cfg.eval.shard_windows, seed=cfg.run.seed)
-    raise NotImplementedError(f"eval loader {name!r} unknown (use gifteval_test | synthetic_eval)")
+    if name == "sanity_eval":
+        from .sanity_loader import make_sanity_eval_shard
+
+        return GiftEvalEvalLoader(make_sanity_eval_shard(cfg))
+    raise NotImplementedError(
+        f"eval loader {name!r} unknown (use gifteval_test | synthetic_eval | sanity_eval)"
+    )

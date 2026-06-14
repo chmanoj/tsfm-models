@@ -70,6 +70,19 @@ class DataCfg:
     )
     # D13 mixture: multiplier 0 removes a dataset (mass renormalized over survivors).
     dataset_weights: Dict[str, float] = field(default_factory=dict)
+    # --- sanity stage (simple-synthetic train->test, scored vs seasonal naive) ---
+    # The sanity loaders ('sanity' train / 'sanity_eval' eval) generate periodic
+    # series whose season length is dataset metadata (never detected by the model),
+    # mirroring GIFT-Eval's test split. `case` selects the generator family;
+    # `season_lengths` is the calendar-style period pool (e.g. weekly=7, daily=24);
+    # `horizon` is the held-out forecast length; `series_len` the per-series length.
+    case: str = "sine_univariate"
+    season_lengths: List[int] = field(default_factory=lambda: [24])
+    horizon: int = 32
+    series_len: int = 512
+    n_channels: int = 4                  # C for multivariate sanity cases
+    # Download root for the real GIFT-Eval tree (lazy; threaded to the eval loader).
+    local_dir: str = ""
 
 
 @dataclass

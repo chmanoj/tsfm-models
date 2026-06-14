@@ -29,8 +29,13 @@ import numpy as np
 import torch
 
 from .. import telescope as TS
-from ..constants import ChannelRole
-from ..metrics import horizon_test_loss
+from ..constants import ChannelRole, Role
+from ..metrics import (
+    horizon_test_loss,
+    mase,
+    seasonal_naive_denom,
+    seasonal_naive_forecast,
+)
 from ..packing.collator import Batch, pack
 from ..tokenize.assemble import assemble
 from ..tokenize.spec import SegmentSpec
@@ -190,3 +195,109 @@ def evaluate_test_loss(
         total += horizon_test_loss(out, batch)
         count += 1
     return total / count if count else float("nan")
+
+
+# --- raw-space forecast reconstruction + MASE (O4) ----------------------------
+
+def horizon_forecast_raw(out, batch, item: EvalItem, *, p_out: int) -> torch.Tensor:
+    """Invert the horizon head to **raw value space** for one eval item.
+
+    Query tokens (``role == QRY``) carry the per-patch horizon prediction in
+    anchored-arcsinh space; ``raw = sinh(pred)·σ + a`` per token (D10 Stage-9
+    inversion, stats broadcast on the Batch). Each query token maps to target
+    channel ``channel_idx - nf`` and horizon patch ``j`` (from ``t_center``);
+    returns ``[p, num_targets]`` (NaN where no query covers a step)."""
+    nf, nt = item.num_features, item.num_targets
+    p = int(item.y_true.shape[0])
+    pred = out.horizon[0]                         # [L, P_out] (B=1, one segment)
+    role = batch.role[0]
+    chan = batch.channel_idx[0]
+    tcen = batch.t_center[0]
+    a = batch.stats_a[0]
+    sig = batch.stats_sigma[0]
+
+    forecast = torch.full((p, nt), float("nan"), dtype=torch.float32, device=pred.device)
+    qpos = (role == int(Role.QRY)).nonzero(as_tuple=True)[0]
+    for pos in qpos.tolist():
+        ti = int(chan[pos]) - nf
+        if ti < 0 or ti >= nt:
+            continue
+        j = int(round((float(tcen[pos]) - p_out * 0.5) / p_out))
+        raw = torch.sinh(pred[pos]) * sig[pos] + a[pos]   # [P_out]
+        lo = j * p_out
+        hi = min(lo + p_out, p)
+        if lo >= p:
+            continue
+        forecast[lo:hi, ti] = raw[: hi - lo].to(torch.float32)
+    return forecast
+
+
+@torch.no_grad()
+def evaluate_mase(
+    forward,
+    loader: GiftEvalEvalLoader,
+    cfg,
+    *,
+    device: str = "cpu",
+    max_windows: Optional[int] = None,
+    basis_seed: int = 0,
+):
+    """MASE of the model vs the seasonal-naive baseline (GIFT-Eval style, O4).
+
+    For each eval item the model's horizon is inverted to raw space and scored
+    against the held-out ``y_true`` with the **dataset-provided** ``season_length``
+    (``EvalItem.season_length``; never detected here). Per target channel:
+    ``MASE = MAE_horizon / in-sample seasonal-naive denom``. Aggregates as the
+    geometric mean across all channel-items (leaderboard convention). Returns a
+    dict with model/seasonal-naive gmeans and the skill ratio (``<1`` beats naive).
+    """
+    params = SamplerParams(
+        l_pack=cfg.packing.L_pack, p_out=cfg.model.out_patch,
+        tier_prior=tuple(cfg.model.tier_alloc_per_channel),
+    )
+    p_out = cfg.model.out_patch
+    cap = cfg.eval.shard_windows if max_windows is None else max_windows
+    log_model: List[float] = []
+    log_snaive: List[float] = []
+    skipped = 0
+    for i, item in enumerate(loader):
+        if i >= cap:
+            break
+        if item.season_length is None:
+            skipped += 1
+            continue
+        m = int(item.season_length)
+        nf, nt = item.num_features, item.num_targets
+        batch = eval_batch(item, params, p_out=p_out, l_pack=cfg.packing.L_pack).to(device)
+        gen = torch.Generator(device=device).manual_seed(basis_seed)
+        basis = make_basis(batch, cfg.model.d_model, device=device, generator=gen)
+        out = forward(batch, variate_basis=basis)
+        forecast = horizon_forecast_raw(out, batch, item, p_out=p_out).cpu()  # [p, nt]
+        y_true = item.y_true.to(torch.float32)                                # [p, nt]
+        context = item.data_tensor                                           # [C, t_ctx]
+        for ti in range(nt):
+            ctx_c = context[nf + ti]
+            denom = seasonal_naive_denom(ctx_c, m)
+            yt = y_true[:, ti]
+            fc = forecast[:, ti]
+            valid = torch.isfinite(fc) & torch.isfinite(yt)
+            if not bool(valid.any()):
+                continue
+            snaive = seasonal_naive_forecast(ctx_c, m, yt.shape[0])
+            log_model.append(mase(yt[valid], fc[valid], denom))
+            log_snaive.append(mase(yt[valid], snaive[valid], denom))
+
+    def _gmean(xs):
+        if not xs:
+            return float("nan")
+        t = torch.tensor(xs, dtype=torch.float64).clamp_min(1e-12)
+        return float(torch.exp(t.log().mean()))
+
+    model_g, snaive_g = _gmean(log_model), _gmean(log_snaive)
+    return {
+        "model_mase": model_g,
+        "snaive_mase": snaive_g,
+        "skill": (model_g / snaive_g) if snaive_g and snaive_g == snaive_g else float("nan"),
+        "n": len(log_model),
+        "skipped": skipped,
+    }

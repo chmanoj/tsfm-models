@@ -37,6 +37,7 @@ def run_training(
     eval_loader=None,
     eval_every: int = 0,
     eval_log: Optional[List[Tuple[int, float]]] = None,
+    eval_fn=None,
 ) -> List[float]:
     """Run up to ``steps`` train steps off the reservoir; return per-step loss.
 
@@ -79,9 +80,12 @@ def run_training(
 
         step = len(losses)
         if eval_loader is not None and eval_every > 0 and step % eval_every == 0:
-            from ..data.eval_loader import evaluate_test_loss
+            fn = eval_fn
+            if fn is None:
+                from ..data.eval_loader import evaluate_test_loss
 
-            tl = evaluate_test_loss(forward, eval_loader, cfg, device=device)
+                fn = evaluate_test_loss
+            tl = fn(forward, eval_loader, cfg, device=device)
             if eval_log is not None:
                 eval_log.append((step, tl))
     return losses

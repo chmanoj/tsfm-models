@@ -1,0 +1,157 @@
+"""Simple-synthetic **sanity** stage — periodic series with a *known* season length.
+
+This is the bring-up experiment that precedes any GIFT-Eval training: train on a
+small pool of simple periodic series and forecast their held-out horizon, scored
+objectively against a **seasonal-naive** baseline (MASE, GIFT-Eval style). The
+goal is to prove the architecture has the capacity to learn — first a single sine
+wave, then one case at a time, then all cases at once.
+
+The season length ``m`` (weekly=7, monthly=12, daily=24, yearly-on-weekly=52, …)
+is **dataset metadata** carried to eval — the model never detects periodicity,
+exactly like the GIFT-Eval test split provides the seasonality. One
+:class:`SanitySpec` is the single source of truth so the ``sanity`` train loader
+and the ``sanity_eval`` eval loader produce the *same* series (train→test on the
+same data), with the last ``horizon`` steps held out for scoring.
+
+Generators return raw ``np.float64`` (unnormalized); the loaders cast to float32
+and honor the frozen :class:`~tetris.data.contract.Item` contract.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Tuple
+
+import numpy as np
+
+SANITY_CASES = (
+    "sine_univariate",         # one clean sine wave (the easiest possible signal)
+    "multivariate_independent",  # C independent sines, same m (variate-id separation)
+    "shared_factor",           # C channels = combos of a shared periodic factor bank (D4)
+    "features_target",         # lagged feature drives target (covariate routing, D5/A3)
+)
+
+
+# --- raw periodic generators (known season length m) ------------------------
+
+def _sine(rng, n: int, m: int, noise_frac: float) -> np.ndarray:
+    """One noisy sine of period ``m``. Observation noise scales with amplitude so a
+    model that learns the underlying sine *beats* seasonal-naive (which propagates
+    the noise from one season ago)."""
+    t = np.arange(n, dtype=np.float64)
+    amp = rng.uniform(1.0, 5.0)
+    phase = rng.uniform(0.0, 2.0 * np.pi)
+    offset = rng.uniform(-10.0, 10.0)
+    signal = offset + amp * np.sin(2.0 * np.pi * t / m + phase)
+    return signal + rng.normal(0.0, noise_frac * amp, n)
+
+
+def gen_sine_univariate(rng, n: int, m: int, C: int, noise_frac: float):
+    return _sine(rng, n, m, noise_frac)[None, :], 0, 1
+
+
+def gen_multivariate_independent(rng, n: int, m: int, C: int, noise_frac: float):
+    """``C`` independent sines sharing the season length ``m`` but with their own
+    amplitude/phase/offset — no cross-channel signal (checks variate-id keeps
+    channels separate)."""
+    x = np.stack([_sine(rng, n, m, noise_frac) for _ in range(C)])
+    return x, 0, C
+
+
+def gen_shared_factor(rng, n: int, m: int, C: int, noise_frac: float, *, bank: int = 4):
+    """``C`` channels = random linear combos of a shared bank of period-``m`` sine
+    factors + idiosyncratic noise + per-channel scale/offset. Channels correlate
+    through the shared factors (the D4 cross-channel routing signal); the season
+    length stays ``m`` for every channel."""
+    factors = np.stack([_sine(rng, n, m, noise_frac=0.0) for _ in range(bank)])
+    out = np.empty((C, n), dtype=np.float64)
+    for c in range(C):
+        k = int(rng.integers(1, bank + 1))
+        sel = rng.choice(bank, size=k, replace=False)
+        w = rng.uniform(0.5, 1.5, k) * rng.choice([-1.0, 1.0], k)
+        sig = (w[:, None] * factors[sel]).sum(0)
+        sig = sig / (sig.std() + 1e-9)
+        scale = np.exp(rng.uniform(-1.0, 1.0))
+        offset = rng.uniform(-10.0, 10.0)
+        out[c] = scale * (sig + noise_frac * rng.normal(0.0, 1.0, n)) + offset
+    return out, 0, C
+
+
+def gen_features_target(rng, n: int, m: int, C: int, noise_frac: float):
+    """One feature (period-``m`` sine) drives a target that reads it lagged by
+    ``k`` steps + small noise. Features-first ``[feature; target]`` (nf=1, nt=1) —
+    a channel-independent baseline cannot capture the lagged edge."""
+    feature = _sine(rng, n, m, noise_frac)
+    lag = int(rng.integers(1, min(m, n // 4) + 1))
+    target = np.empty(n, dtype=np.float64)
+    target[:lag] = feature[0]
+    target[lag:] = feature[:-lag]
+    target = target + rng.normal(0.0, noise_frac * feature.std(), n)
+    return np.stack([feature, target]), 1, 1
+
+
+_GENERATORS = {
+    "sine_univariate": gen_sine_univariate,
+    "multivariate_independent": gen_multivariate_independent,
+    "shared_factor": gen_shared_factor,
+    "features_target": gen_features_target,
+}
+
+
+# --- the matched train/eval source of truth ---------------------------------
+
+@dataclass
+class SanitySpec:
+    """Generates one reproducible periodic series per index, the single source of
+    truth shared by the ``sanity`` train loader and the ``sanity_eval`` shard.
+
+    ``make(idx)`` returns ``(data[C, series_len], nf, nt, m)`` raw; the last
+    ``horizon`` steps are the held-out forecast target. ``n_series`` distinct
+    series form the overfit pool (the train loader cycles over them)."""
+
+    case: str = "sine_univariate"
+    season_lengths: Tuple[int, ...] = (24,)
+    series_len: int = 512
+    horizon: int = 32
+    n_channels: int = 4
+    n_series: int = 64
+    noise_frac: float = 0.1
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.case not in _GENERATORS:
+            raise ValueError(f"unknown sanity case {self.case!r}; pick from {SANITY_CASES}")
+        if not self.season_lengths:
+            raise ValueError("season_lengths must be non-empty")
+        if self.horizon >= self.series_len:
+            raise ValueError(f"horizon {self.horizon} must be < series_len {self.series_len}")
+        self.season_lengths = tuple(int(m) for m in self.season_lengths)
+
+    @classmethod
+    def from_cfg(cls, cfg) -> "SanitySpec":
+        d = cfg.data
+        return cls(
+            case=d.case,
+            season_lengths=tuple(d.season_lengths),
+            series_len=d.series_len,
+            horizon=d.horizon,
+            n_channels=d.n_channels,
+            n_series=d.n_series,
+            seed=cfg.run.seed,
+        )
+
+    def season_of(self, idx: int) -> int:
+        return self.season_lengths[idx % len(self.season_lengths)]
+
+    def make(self, idx: int):
+        """Raw full series for ``idx`` → ``(data[C, series_len], nf, nt, m)``."""
+        rng = np.random.default_rng((self.seed, idx))
+        m = self.season_of(idx)
+        data, nf, nt = _GENERATORS[self.case](
+            rng, self.series_len, m, self.n_channels, self.noise_frac
+        )
+        return np.ascontiguousarray(data, dtype=np.float64), int(nf), int(nt), m
+
+    @property
+    def context_len(self) -> int:
+        return self.series_len - self.horizon

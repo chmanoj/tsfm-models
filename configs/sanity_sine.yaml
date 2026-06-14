@@ -1,0 +1,41 @@
+# Sanity stage — sine-univariate train->test, scored vs seasonal naive (MASE).
+# The smallest possible bring-up: can the architecture learn a clean periodic
+# signal at all? Tiny model, CPU/eager-friendly. Train on the context of a small
+# pool of noisy sines (period m=24 = dataset metadata), forecast the held-out
+# horizon, score MASE against the seasonal-naive baseline.
+
+run:
+  name: sanity_sine
+  steps: 400
+  seed: 0
+
+backend:
+  device: auto        # mps/cpu -> sdpa + eager (local); cuda -> flex + compile
+  compile: false      # eager for the CPU smoke; flip on for the GPU run
+
+model:
+  d_model: 64
+  n_layers: 3
+  n_heads: 4
+  out_patch: 8
+
+data:
+  loader: sanity
+  case: sine_univariate
+  season_lengths: [24]
+  horizon: 32
+  series_len: 512
+  n_series: 64
+  n_channels: 1
+
+packing:
+  L_pack: 256
+  buffers_per_step: 4
+  reservoir: true
+  reservoir_k: 64
+  scheduler_window: 64
+
+eval:
+  enabled: true
+  loader: sanity_eval
+  shard_windows: 64   # score all 64 sanity series

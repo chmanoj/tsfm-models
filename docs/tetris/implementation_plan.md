@@ -204,6 +204,44 @@ vectors across layouts (training resamples freely). All four pre-training gates
   its new disjoint shard. `rank_shard` is the deterministic round-robin partition
   `StandInPretrainLoader` already uses. **S13 closes the build order (S0–S13).**
 
+**Sanity stage reconciliation (post-S13, real-data bring-up — pinned, do not re-flag):**
+- **Deliberate departure from zero-shot, staged.** The decision log targets
+  zero-shot pretraining on `GiftEvalPretrain` → zero-shot GIFT-Eval. Before any of
+  that, the maintainer chose a **simple-synthetic in-distribution `train→test`
+  bring-up** to prove the architecture has capacity to learn at all: (1) sine
+  univariate first, then (2) one case at a time, then (3) all cases together; then
+  GIFT-Eval `test→test` overfit; then synthetic + Pretrain + GIFT-Eval `train` →
+  GIFT-Eval `test`. This does **not** rewrite the docs' zero-shot framing — it is a
+  bring-up ladder in front of it.
+- **MASE (O4) is un-deferred — but period detection is NOT in the model.** Scoring
+  is GIFT-Eval/gluonts MASE = `MAE_horizon / in-sample seasonal-naive denom`, in
+  **raw value space** (the horizon head is inverted out of anchored-arcsinh via
+  `sinh(·)·σ+a`, the D10 Stage-9 receipts on the Batch). The season length `m` is
+  **dataset metadata** carried on `EvalItem.season_length` (synthetic series are
+  generated with known calendar-style periods; GIFT-Eval provides its own), exactly
+  as the leaderboard provides seasonality. `metrics.{seasonal_naive_forecast,
+  seasonal_naive_denom,mase}` are now real (raw-space, 1-D per channel);
+  `evaluate_mase` reports model vs seasonal-naive gmean MASE + the skill ratio.
+- **New seams, all additive / frozen seams untouched.** `data/sanity.py`
+  (`SanitySpec` = single source of truth for matched train+eval series) +
+  `data/sanity_loader.py` (`SanityTrainLoader`, cyclic overfit pool, O6 rank-shard;
+  `make_sanity_eval_shard`). Factory keys `sanity` (train) / `sanity_eval` (eval).
+  `EvalItem` gained `season_length: Optional[int] = None` (defaulted → GIFT-Eval/
+  synthetic-eval constructors unchanged). `DataCfg` gained `case`,
+  `season_lengths`, `horizon`, `series_len`, `n_channels`, `local_dir` (additive
+  structured-config merge). `run_training` gained an optional `eval_fn` (defaults to
+  `evaluate_test_loss`) so the loop can record MASE mid-train. `pack`/`assemble`/
+  `Batch`/`window_sampler` are **untouched** — the sanity loader yields the frozen
+  `Item`, eval reuses the frozen no-leakage `eval_batch`.
+- **Entrypoint + artifacts.** `train/sanity_run.py` ties loader→eval→MASE and writes
+  a git-ignored `outputs/<run>_<ts>/` per run: `command.txt`, resolved `config.yaml`,
+  `train_log.txt` (stdlib logging, `time | level | module | msg`; logs param counts,
+  device, loader sizes, per-eval MASE, total training time), and `samples.png`
+  (5 random eval samples: context + actual vs model vs seasonal-naive, all cases).
+  **First result (sine univariate, d=64/3L, CPU):** model MASE 6.8 (random) → 0.81,
+  beating seasonal naive (0.98) — the architecture learns. `test_sanity_mase`
+  (offline, CI-safe) guards the MASE math + the learns-a-sine smoke.
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).
