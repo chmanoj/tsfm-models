@@ -82,6 +82,14 @@ pack(buffers: list[list[AssembledSegment]], *, l_pack, p_out, num_buffers=None) 
 - **Metrics (D13):** v1 records **test loss only** (horizon MAE on a shard);
   **MASE deferred (O4)** — `seasonal_naive_denom`/`mase` are stubs.
 
+**S9 gate (passed) — pinned test convention:** `test_pack_invariance` proves the D8
+no-leakage invariant (identical samples solo vs packed-together / permuted /
+regrouped → identical per-sample outputs **and** total loss). Because D4 variate IDs
+are *relational* (a single forward is not invariant to which orthonormal vectors are
+drawn), the **test pins a fixed basis** mapping each sample's channels to the same ID
+vectors across layouts (training resamples freely). All four pre-training gates
+(S1, S2, S5, S9) + the required `test_aux_boundary` are green.
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).
