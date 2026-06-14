@@ -52,10 +52,10 @@ class ModelCfg:
     # counts are dynamic per segment = ratio * n, rebalanced to T_raw. This
     # vector normalizes to the design-point proportions ([8,8,8,8,8,4] at n=44).
     tier_alloc_per_channel: List[int] = field(default_factory=lambda: [16, 16, 16, 16, 16, 8])
-    # Static dispatch capacity (MoE index routing): the per-buffer context-slot
-    # space, ≈ L_pack − max_Q. 0 → resolve to packing.L_pack at build time.
-    # Per-tier index tensors tier_idx[k] are [B, n_ctx_cap] (1-D, sentinel-padded).
-    n_ctx_cap: int = 0
+    # Static per-tier encoder dispatch capacity (walkthrough Stage 7 ENCODER_CAP).
+    # Each encoder_k runs [CAP, P_k, 2]→[CAP, D] at this fixed row count,
+    # sentinel-padded + masked. 0 → resolve to packing.L_pack (the default = L).
+    encoder_cap: int = 0
 
 
 @dataclass
@@ -134,8 +134,8 @@ class Config:
             )
         if any(w <= 0 for w in self.model.tier_alloc_per_channel):
             raise ValueError("model.tier_alloc_per_channel entries must be positive (ratio prior)")
-        if self.model.n_ctx_cap < 0:
-            raise ValueError("model.n_ctx_cap must be >= 0 (0 resolves to packing.L_pack)")
+        if self.model.encoder_cap < 0:
+            raise ValueError("model.encoder_cap must be >= 0 (0 resolves to packing.L_pack)")
         if len(self.loss.aux_weights) != V:
             raise ValueError(f"loss.aux_weights must have {V} entries; got {self.loss.aux_weights}")
         if self.norm.input_norm not in ("anchored_arcsinh", "zscore_arcsinh"):
@@ -146,9 +146,9 @@ class Config:
             raise ValueError(f"unknown norm.loss_space={self.norm.loss_space!r}")
 
 
-def resolved_n_ctx_cap(cfg: "Config") -> int:
-    """Static per-buffer context-slot capacity (MoE dispatch). 0 → L_pack."""
-    return cfg.model.n_ctx_cap if cfg.model.n_ctx_cap > 0 else cfg.packing.L_pack
+def resolved_encoder_cap(cfg: "Config") -> int:
+    """Static per-tier encoder dispatch capacity (ENCODER_CAP). 0 → L_pack."""
+    return cfg.model.encoder_cap if cfg.model.encoder_cap > 0 else cfg.packing.L_pack
 
 
 def load_config(path: str) -> Config:

@@ -15,7 +15,7 @@ model:
   patch_vocab: [4, 8, 16, 64, 256, 512]
   out_patch: 16           # D12 design point
   tier_alloc_per_channel: [16, 16, 16, 16, 16, 8]   # ratio prior; normalizes to [8,8,8,8,8,4] at n=44
-  n_ctx_cap: 0            # 0 -> L_pack; static MoE dispatch slot space (≈ L_pack − max_Q)
+  encoder_cap: 0          # 0 -> L_pack; static per-tier encoder dispatch capacity (ENCODER_CAP)
 data:
   loader: standin_pretrain
   C_distribution: [1, 21]

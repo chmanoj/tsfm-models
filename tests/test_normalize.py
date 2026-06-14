@@ -88,9 +88,10 @@ def test_intermittent_uses_mean_abs_fallback():
 def test_per_tier_sigma_present_and_finite():
     x = _series_bank()["random_walk"]
     st = N.compute_stats(x)
-    assert st.sigma_tier.shape == (V,)
-    assert torch.isfinite(st.sigma_tier).all()
-    assert (st.sigma_tier > 0).all()
+    assert st.sigma_delta.shape == (V,)
+    assert torch.isfinite(st.sigma_delta).all()
+    assert (st.sigma_delta > 0).all()
+    assert float(st.sigma) == float(st.sigma_delta[0])  # base scale == sigma_delta[0]
 
 
 def test_loss_target_inverse_consistency():
@@ -104,8 +105,8 @@ def test_loss_target_inverse_consistency():
     # aux target: arcsinh of local increment in tier vol units (tier 0)
     level = x[100]
     future = x[101:105]
-    at = N.aux_target(future, level, st.sigma_tier[0])
-    recon = torch.sinh(at) * st.sigma_tier[0] + level
+    at = N.aux_target(future, level, st.sigma_delta[0])
+    recon = torch.sinh(at) * st.sigma_delta[0] + level
     torch.testing.assert_close(recon, future, rtol=1e-9, atol=1e-6)
 
 

@@ -43,15 +43,25 @@ _REL_FLOOR = 1e-3  # sigma_delta >= 1e-3 * IQR/1.349
 
 @dataclass
 class ChannelStats:
-    """Per-channel normalization statistics (D10). ``a`` and ``sigma`` are the
-    global anchor/step-scale; ``sigma_tier`` is the per-tier step-scale (length V).
-    ``fallback`` records which rung of the sigma chain produced ``sigma`` —
-    one of {"mad", "mean_abs", "iqr", "unit"} — for diagnostics/receipts (D10)."""
+    """Per-(sample,channel) normalization statistics (D10 / walkthrough Stage 3).
+    One anchor ``a`` and a per-tier scale vector ``sigma_delta[V]``, constant across
+    all timesteps (not rolling/per-step — this is what makes 2-number inversion work).
 
-    a: torch.Tensor          # scalar
-    sigma: torch.Tensor      # scalar
-    sigma_tier: torch.Tensor # [V]
+    - ``sigma_delta[0]`` is the raw base ``1.4826·median|Δx|``; it is the scale used
+      for the input ``norm_values`` and for Stage-9 horizon inversion.
+    - ``sigma_delta[1..5]`` are per-tier scales (robust σ of each tier's aggregated
+      sequence), used for the locally-reanchored aux targets (D10) and receipts (D4).
+
+    ``fallback`` records which rung of the base sigma chain fired (diagnostic)."""
+
+    a: torch.Tensor            # scalar
+    sigma_delta: torch.Tensor  # [V]
     fallback: str
+
+    @property
+    def sigma(self) -> torch.Tensor:
+        """The base scale used for input normalization / inversion = sigma_delta[0]."""
+        return self.sigma_delta[0]
 
 
 def _finite(v: torch.Tensor) -> torch.Tensor:
@@ -150,26 +160,25 @@ def compute_stats(x: torch.Tensor, anchor_window: int = 32) -> ChannelStats:
         a = torch.zeros((), dtype=torch.float64)
 
     diffs = xf[1:] - xf[:-1] if n >= 2 else xf.new_empty(0)
-    sigma, fallback = _robust_sigma(xf, diffs)
+    sigma_base, fallback = _robust_sigma(xf, diffs)
 
-    # Per-tier sigma from each tier's aggregated sequence; fall back to the
-    # global sigma when a tier has too few aggregated points.
-    sigma_tier: List[torch.Tensor] = []
-    for p in PATCH:
+    # sigma_delta[0] = raw base (input scale); [1..5] = per-tier aggregated scales,
+    # falling back to the base when a tier has too few aggregated points.
+    sigma_delta: List[torch.Tensor] = [sigma_base]
+    for p in PATCH[1:]:
         agg = _tier_aggregate(xf, p)
         if agg.numel() >= 2:
             d = agg[1:] - agg[:-1]
             s_k, _ = _robust_sigma(agg, d)
             if not (s_k > 0):
-                s_k = sigma
+                s_k = sigma_base
         else:
-            s_k = sigma
-        sigma_tier.append(s_k)
+            s_k = sigma_base
+        sigma_delta.append(s_k)
 
     return ChannelStats(
         a=a.to(in_dtype),
-        sigma=sigma.to(in_dtype),
-        sigma_tier=torch.stack(sigma_tier).to(in_dtype),
+        sigma_delta=torch.stack(sigma_delta).to(in_dtype),
         fallback=fallback,
     )
 

@@ -1,19 +1,22 @@
-"""assemble (D9.2 / D7 / D10) — the pure per-segment tokenizer; the heart of the
-collator. Given ``(item, spec)`` it normalizes per channel (D10), builds the
-channel-major token layout (D8), per-tier raw windows (value + observed
-indicator, D7), side tensors, query/KFF tokens, and per-channel norm stats.
+"""assemble (walkthrough Stages 2–3 boundary) — the pure per-segment tokenizer.
 
-Layout (channel-major, segment-local positions in ``[0, S)``): each channel ``c``
-occupies a contiguous block ``[base_c, base_c + n_eff + horizon_c)`` —
-``n_eff`` context tokens then ``horizon_c`` horizon tokens. Horizon tokens are
-query [MASK] tokens for target channels (separate, learned embedding) and
-observed known-future-feature (KFF) tokens for revealed features (routed through
-the P_out-tier encoder like any observed token).
+Given ``(item, spec, p_out)`` it: normalizes each channel (D10, context-only),
+builds a **flat per-segment normalized raw store** (``norm_values``/``observed``,
+indexed by each token's ``raw_start`` — the gather store), and emits the per-token
+side tensors. Horizon ground-truth is emitted **dense over the segment**
+(``[S, P_out]`` + valid), matching the Batch's ``[B,L,P_out]`` (no per-batch Qmax).
+Pure — no buffer/global state (S9).
 
-Per-tier dispatch is emitted as ``(positions, values, observed)`` lists at the
-*actual* token counts; the collator scatters them into the static MoE index
-space (``tier_idx[k]`` of length ``n_ctx_cap``). This is a pure function — no
-global/buffer state — so packed and unpacked runs are identical (S9).
+Token tagging uses the three decision-log enums:
+- ``role ∈ {CTX, QRY}`` (D6/D9) — drives the attention mask.
+- ``content_state ∈ {OBSERVED, MASK, NA}`` (D7) — selects the content slot.
+- ``role_ft ∈ {FEATURE, TARGET}`` (D11) — the added role embedding.
+
+A **KFF token** is just an observed CTX feature token at ``t_center > 0`` (D11) —
+``role=CTX, content_state=OBSERVED, role_ft=FEATURE``, encoded by the P_out tier
+encoder; no KFF role/state exists. ``norm_values`` uses the base scale
+``sigma_delta[0]`` (D10 input z); per-tier ``sigma_delta[1..5]`` ride along for
+aux targets / receipts. Encoder-routed tokens are exactly ``content_state==OBSERVED``.
 """
 
 from __future__ import annotations
@@ -26,63 +29,59 @@ import torch
 
 from .. import normalize as norm
 from .. import telescope as TS
-from ..constants import PATCH, V, ContentState, Role, RoleFT
+from ..constants import ChannelRole, ContentState, PATCH, Role, RoleFT, V
 from .spec import SegmentSpec
 
-VAR_FEAT_DIM = 4  # D4/D10 content-summary receipts: [log σ, arcsinh a, fallback code, log1p|a|]
-_FALLBACK_CODE = {"mad": 0.0, "mean_abs": 1.0, "iqr": 2.0, "unit": 3.0}
+_NO_RAW = -1  # raw_start sentinel for tokens with no encoder window (MASK/NA)
 
 
 @dataclass
 class AssembledSegment:
     S: int
     C: int
-    # side tensors (segment-local), each length S
-    channel_idx: np.ndarray      # int32
-    vslot_local: np.ndarray      # int32 (one variate per channel within a segment)
-    t_center: np.ndarray         # float32 (steps vs origin; <0 past, >=0 horizon)
-    span: np.ndarray             # int8 (tier index)
-    role: np.ndarray             # int8 (Role)
-    role_ft: np.ndarray          # int8 (RoleFT)
-    content_state: np.ndarray    # int8 (ContentState)
-    valid: np.ndarray            # bool
-    # per-tier context dispatch (lists of length V; observed tokens only)
-    tier_pos: List[np.ndarray]       # int64 [count_k] local positions
-    tier_values: List[np.ndarray]    # float32 [count_k, P_k] normalized z, NaN->0
-    tier_observed: List[np.ndarray]  # float32 [count_k, P_k] 0/1 indicator
-    # horizon query tokens (target channels)
-    qry_pos: np.ndarray          # int64 [Q]
-    qry_channel: np.ndarray      # int64 [Q]
-    qry_hidx: np.ndarray         # int64 [Q] horizon-patch index 0..q_tok-1
-    # per-channel normalization stats (for inversion + receipts)
-    norm_a: np.ndarray           # float32 [C]
-    norm_sigma: np.ndarray       # float32 [C]
-    norm_sigma_tier: np.ndarray  # float32 [C, V]
-    var_feats: np.ndarray        # float32 [C, VAR_FEAT_DIM]
+    # per-token side arrays (channel-major), length S
+    tier_id: np.ndarray        # int8   [S]
+    channel: np.ndarray        # int32  [S]
+    raw_start: np.ndarray      # int32  [S]  offset into this segment's norm_values
+    role: np.ndarray           # int8   [S]  Role {CTX, QRY}
+    content_state: np.ndarray  # int8   [S]  ContentState {OBSERVED, MASK, NA}
+    role_ft: np.ndarray        # int8   [S]  RoleFT {FEATURE, TARGET}
+    variate_uid: np.ndarray    # int32  [S]  per-(segment,channel) local id
+    t_center: np.ndarray       # float32[S]
+    valid_aux: np.ndarray      # bool   [S]
+    # flat per-segment normalized raw store (concatenated per channel)
+    norm_values: np.ndarray    # float32[R_seg]
+    observed: np.ndarray       # bool   [R_seg]
+    # per-channel stats (a + per-tier sigma); receipts for D4 + Stage-9 inversion
+    stats_a: np.ndarray            # float32[C]
+    stats_sigma_delta: np.ndarray  # float32[C, V]
+    # dense horizon ground truth (only query slots carry real data)
+    horizon_target: np.ndarray     # float32[S, P_out]
+    target_valid: np.ndarray       # bool   [S, P_out]
 
 
-def _gather_window(z: np.ndarray, raw: np.ndarray, start: int, width: int):
-    """Normalized values + observed indicator for raw indices ``[start, start+width)``,
-    clipped to the series and to finite raw values (out-of-range / NaN → not observed)."""
-    n = z.shape[0]
-    idx = start + np.arange(width)
+def _norm_window(raw: np.ndarray, lo: int, length: int, a: float, sigma: float):
+    """Normalized values + observed indicator for raw indices ``[lo, lo+length)``
+    (out-of-range / NaN → value 0, observed False)."""
+    n = raw.shape[0]
+    idx = lo + np.arange(length)
     in_range = (idx >= 0) & (idx < n)
     safe = np.clip(idx, 0, n - 1)
     obs = in_range & np.isfinite(raw[safe])
-    vals = np.where(obs, z[safe], 0.0).astype(np.float32)
-    return vals, obs.astype(np.float32)
+    vals = np.where(obs, np.arcsinh((raw[safe] - a) / sigma), 0.0).astype(np.float32)
+    return vals, obs
 
 
-def assemble(item, spec: SegmentSpec) -> AssembledSegment:
+def assemble(item, spec: SegmentSpec, p_out: int) -> AssembledSegment:
     data, n_features, n_targets = item
     C = spec.C
     assert data.shape[0] == C
-    x = data.detach().cpu().numpy().astype(np.float64)  # [C, t], may contain NaN
-    t_raw = spec.t_raw
+    raw = data.detach().cpu().numpy().astype(np.float64)  # [C, t]
     origin = spec.origin
     counts = spec.counts
-    qspan = PATCH.index(spec.p_out)
-    P_out = spec.p_out
+    cov = TS.coverage(counts)
+    qspan = PATCH.index(p_out)
+    q_tok = spec.q_tok
 
     # channel-major block layout
     horizon = [spec.horizon_tokens(c) for c in range(C)]
@@ -91,90 +90,108 @@ def assemble(item, spec: SegmentSpec) -> AssembledSegment:
     S = int(sum(block_sizes))
     assert S == spec.S, (S, spec.S)
 
-    channel_idx = np.full(S, -1, np.int32)
-    vslot_local = np.full(S, -1, np.int32)
-    t_center = np.zeros(S, np.float32)
-    span = np.full(S, qspan, np.int8)
+    tier_id = np.zeros(S, np.int8)
+    channel = np.full(S, -1, np.int32)
+    raw_start = np.full(S, _NO_RAW, np.int32)
     role = np.full(S, int(Role.CTX), np.int8)
-    role_ft = np.zeros(S, np.int8)
     content_state = np.full(S, int(ContentState.OBSERVED), np.int8)
-    valid = np.ones(S, bool)
+    role_ft = np.zeros(S, np.int8)
+    variate_uid = np.full(S, -1, np.int32)
+    t_center = np.zeros(S, np.float32)
+    valid_aux = np.zeros(S, bool)
+    horizon_target = np.zeros((S, p_out), np.float32)
+    target_valid = np.zeros((S, p_out), bool)
 
-    tier_pos: List[list] = [[] for _ in range(V)]
-    tier_values: List[list] = [[] for _ in range(V)]
-    tier_observed: List[list] = [[] for _ in range(V)]
-    qry_pos, qry_channel, qry_hidx = [], [], []
+    stats_a = np.zeros(C, np.float32)
+    stats_sigma_delta = np.ones((C, V), np.float32)
+    store_chunks: List[np.ndarray] = []
+    obs_chunks: List[np.ndarray] = []
+    store_base = 0  # running offset into the segment's flat store
 
-    norm_a = np.zeros(C, np.float32)
-    norm_sigma = np.ones(C, np.float32)
-    norm_sigma_tier = np.ones((C, V), np.float32)
-    var_feats = np.zeros((C, VAR_FEAT_DIM), np.float32)
-
-    cov = TS.coverage(counts)
     for c in range(C):
-        rc = x[c]
-        # context statistics from the context window only (no leakage, D10)
+        rc = raw[c]
         ctx = rc[max(0, origin - cov):origin]
         st = norm.compute_stats(torch.from_numpy(ctx))
-        a = float(st.a); sig = float(st.sigma)
-        norm_a[c] = a; norm_sigma[c] = sig
-        norm_sigma_tier[c] = st.sigma_tier.numpy().astype(np.float32)
-        var_feats[c] = [np.log(sig + 1e-12), np.arcsinh(a), _FALLBACK_CODE[st.fallback], np.log1p(abs(a))]
-        z = np.arcsinh((rc - a) / sig)  # whole-series normalized (KFF future uses context stats)
+        a = float(st.a); sigma = float(st.sigma)  # sigma = sigma_delta[0], base scale
+        stats_a[c] = a
+        stats_sigma_delta[c] = st.sigma_delta.numpy().astype(np.float32)
+
+        cr = spec.channel_roles[c]
+        is_target = cr == int(ChannelRole.TARGET)
+        is_kff = cr == int(ChannelRole.KFF)
+        rft = int(RoleFT.TARGET) if is_target else int(RoleFT.FEATURE)
+
+        # --- per-channel flat store: context [origin-cov, origin) + (KFF) horizon ---
+        store_lo = origin - cov
+        ctx_vals, ctx_obs = _norm_window(rc, store_lo, cov, a, sigma)
+        if is_kff:
+            h_len = q_tok * p_out
+            h_vals, h_obs = _norm_window(rc, origin, h_len, a, sigma)
+            chunk_vals = np.concatenate([ctx_vals, h_vals])
+            chunk_obs = np.concatenate([ctx_obs, h_obs])
+        else:
+            chunk_vals, chunk_obs = ctx_vals, ctx_obs
+        store_chunks.append(chunk_vals); obs_chunks.append(chunk_obs)
 
         base = int(bases[c])
-        # --- context tokens (channel-major), via telescope dispatch ---
+        # --- context tokens via telescope dispatch (channel-major) ---
         disp = TS.build_dispatch(counts, origin, channel_base=base, n_per_channel=block_sizes[c])
         for k, tslice in enumerate(disp.tiers):
             for i in range(tslice.scatter_pos.shape[0]):
                 pos = int(tslice.scatter_pos[i])
                 rs = int(tslice.raw_start[i]); re = int(tslice.raw_end[i])
-                vals, obs = _gather_window(z, rc, rs, PATCH[k])
-                channel_idx[pos] = c; vslot_local[pos] = c
-                span[pos] = k; role[pos] = int(Role.CTX); role_ft[pos] = spec.role_ft[c]
+                _, obs = _norm_window(rc, rs, PATCH[k], a, sigma)
+                channel[pos] = c; variate_uid[pos] = c; tier_id[pos] = k
+                role[pos] = int(Role.CTX); role_ft[pos] = rft
                 t_center[pos] = (rs + re) * 0.5 - origin
-                content_state[pos] = int(ContentState.OBSERVED) if obs.any() else int(ContentState.NA)
-                tier_pos[k].append(pos); tier_values[k].append(vals); tier_observed[k].append(obs)
+                if obs.any():
+                    content_state[pos] = int(ContentState.OBSERVED)
+                    raw_start[pos] = store_base + (rs - store_lo)
+                else:
+                    content_state[pos] = int(ContentState.NA)  # fully-missing patch (D7)
+                # aux next-patch validity (raw-time): region [re, re+P_k) in-context & observed
+                tgt_lo, tgt_hi = re, re + PATCH[k]
+                if tgt_hi <= origin and tgt_lo >= 0:
+                    _, tobs = _norm_window(rc, tgt_lo, PATCH[k], a, sigma)
+                    valid_aux[pos] = bool(tobs.any())
 
         # --- horizon tokens ---
         if horizon[c] == 0:
+            store_base += chunk_vals.shape[0]
             continue
-        is_target = spec.role_ft[c] == int(RoleFT.TARGET)
-        for j in range(spec.q_tok):
+        for j in range(q_tok):
             pos = base + spec.n_eff + j
-            channel_idx[pos] = c; vslot_local[pos] = c
-            span[pos] = qspan; role_ft[pos] = spec.role_ft[c]
-            t_center[pos] = j * P_out + P_out * 0.5
+            channel[pos] = c; variate_uid[pos] = c; tier_id[pos] = qspan
+            role_ft[pos] = rft
+            t_center[pos] = j * p_out + p_out * 0.5
             if is_target:
                 # query [MASK] token — learned embedding, routed to the horizon head
                 role[pos] = int(Role.QRY)
                 content_state[pos] = int(ContentState.MASK)
-                qry_pos.append(pos); qry_channel.append(c); qry_hidx.append(j)
-            else:
-                # known-future feature: observed token at a horizon timestamp,
-                # encoded by the P_out-tier encoder like any observed token
+                hv, hobs = _norm_window(rc, origin + j * p_out, p_out, a, sigma)
+                within = (j * p_out + np.arange(p_out)) < spec.p
+                horizon_target[pos] = hv
+                target_valid[pos] = hobs & within
+            else:  # KFF: observed CTX feature token at t>0, routed to the P_out encoder
                 role[pos] = int(Role.CTX)
-                vals, obs = _gather_window(z, rc, origin + j * P_out, P_out)
-                content_state[pos] = int(ContentState.OBSERVED) if obs.any() else int(ContentState.NA)
-                tier_pos[qspan].append(pos)
-                tier_values[qspan].append(vals)
-                tier_observed[qspan].append(obs)
+                _, hobs = _norm_window(rc, origin + j * p_out, p_out, a, sigma)
+                if hobs.any():
+                    content_state[pos] = int(ContentState.OBSERVED)
+                    raw_start[pos] = store_base + cov + j * p_out
+                else:
+                    content_state[pos] = int(ContentState.NA)
+        store_base += chunk_vals.shape[0]
 
-    def _stack(lst, width):
-        if lst:
-            return np.stack(lst).astype(np.float32)
-        return np.zeros((0, width), np.float32)
+    norm_values = (np.concatenate(store_chunks) if store_chunks
+                   else np.zeros(0, np.float32)).astype(np.float32)
+    observed = (np.concatenate(obs_chunks) if obs_chunks else np.zeros(0, bool))
 
     return AssembledSegment(
         S=S, C=C,
-        channel_idx=channel_idx, vslot_local=vslot_local, t_center=t_center,
-        span=span, role=role, role_ft=role_ft, content_state=content_state, valid=valid,
-        tier_pos=[np.asarray(p, np.int64) for p in tier_pos],
-        tier_values=[_stack(tier_values[k], PATCH[k]) for k in range(V)],
-        tier_observed=[_stack(tier_observed[k], PATCH[k]) for k in range(V)],
-        qry_pos=np.asarray(qry_pos, np.int64),
-        qry_channel=np.asarray(qry_channel, np.int64),
-        qry_hidx=np.asarray(qry_hidx, np.int64),
-        norm_a=norm_a, norm_sigma=norm_sigma, norm_sigma_tier=norm_sigma_tier,
-        var_feats=var_feats,
+        tier_id=tier_id, channel=channel, raw_start=raw_start,
+        role=role, content_state=content_state, role_ft=role_ft,
+        variate_uid=variate_uid, t_center=t_center, valid_aux=valid_aux,
+        norm_values=norm_values, observed=observed,
+        stats_a=stats_a, stats_sigma_delta=stats_sigma_delta,
+        horizon_target=horizon_target, target_valid=target_valid,
     )

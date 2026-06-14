@@ -1,6 +1,13 @@
 # TETRIS — Implementation Plan (v1)
 
-**Status:** planning artifact. No model/training code yet. Source of truth: `docs/tetris/tetris_decision_log.html` (rev 17, D1–D15 + v2 backlog). This plan does **not** redesign any decided item; it sequences them into buildable modules with smoke/unit tests.
+**Status:** planning artifact. No model/training code yet. Source of truth: `docs/tetris/tetris_decision_log.html` (rev 17, D1–D15 + v2 backlog). **The pinned end-to-end type/shape reference is `docs/tetris/tetris_pipeline_walkthrough.html`** (Stages 1–9 with exact signatures and tensor shapes); where this plan and the walkthrough differ, the walkthrough wins. This plan does **not** redesign any decided item; it sequences them into buildable modules with smoke/unit tests.
+
+**Walkthrough reconciliation (post-S4 — pinned, do not re-flag):**
+- **`SegmentSpec` carries a per-channel role list** `channel_roles: list[C] ∈ {FEATURE, TARGET, KFF}` (plus scalar `C, n_features, n_targets, origin, p, Q, K, Q_total, n, counts[6]`). It is CPU pack-time data and never reaches the GPU, so a variable-length list there does **not** affect the static compiled shapes (the *Batch* tensors stay `[B,L]`). No positional KFF assumption.
+- **Normalization stats are per-(sample,channel) constants**, not per-step: `Stats = {a: float, sigma_delta: float[6]}`. `a:[n_samples,C]`, `σΔ:[n_samples,C,6]`. `sigma_delta[0]` is the base scale `1.4826·median|Δx|` used for the input `norm_values` and Stage-9 inversion; `[1..5]` are per-tier scales for the locally-reanchored aux targets (D10) and the D4 variate scale-receipt. `norm_values[R]` is the only per-timestep quantity.
+- **Three token enums retained (decision-log faithful):** `role ∈ {CTX, QRY}` (D6/D9, drives the mask), `content_state ∈ {OBSERVED, MASK, NA}` (D7, selects the content slot), `role_ft ∈ {FEATURE, TARGET}` (D11, the added role embedding). **KFF is not a token role** — it is an observed CTX *feature* token at `t_center > 0` (D11: distinguished by time, not a role), encoded by the P_out tier encoder. The embedding is a 5-part sum (content, time, span, variate, **role_ft**); `content_state` *selects* the content slot (encoder output | `[MASK]` | `[NA]`) and is not itself added; `role`/CTX-QRY is structural (mask + content + masks at loss). The target→feature *demotion* half of D11 augmentation is deferred; KFF-reveal among native features is kept.
+- **Everything compiles at static shape `L`.** No per-batch `Qmax`. `horizon_target`/`target_valid` are dense `[B,L,P_out]`; encoders run at static `ENCODER_CAP` (config `model.encoder_cap`, default `L`), `[CAP,P_k,2]→[CAP,D]`, sentinel-padded; heads run dense over all `L`, gather/mask at loss time. The encoder input "2" = (normalized value, observed-indicator) per timestep (D7). Encoder-routed tokens are exactly `content_state==OBSERVED`.
+- **Attention mask (S5)** is the decision-log D9 truth table (KFF behaves as CTX: queries read it, it never attends queries). Earlier `tier_caps`→`tier_alloc_per_channel` (ratio prior) and `n_ctx_cap`→`encoder_cap` (= `ENCODER_CAP`).
 
 **Decided session conventions** (from clarifying Q&A):
 
@@ -31,26 +38,30 @@ All per-batch shapes are static (D14: one compile graph; per-sample variability 
 | `V` | telescope tiers / patch vocab size | 6 | 6 |
 | `PATCH` | patch vocabulary | `{4,8,16,64,256,512}` | same |
 | `P_out` | horizon output patch | 8 | 16 |
-| `cap_k` | static per-buffer capacity of tier-`k` tokens | small | from D12 alloc bounds + headroom |
-| `C_slot` | max variate slots per buffer | small | from packer |
-| `Q_max` | max query tokens per buffer | small | `n_targets·⌈p/P_out⌉` bound |
-| `A_max` | max aux source tokens per buffer | = ctx tokens | — |
+| `ENCODER_CAP` | static per-tier encoder dispatch capacity (`model.encoder_cap`, 0→L) | = L | = L |
+| `R` | per-buffer raw-store length (`norm_values[B,R]`); raw steps, padded | data | data |
 
-**Variate slot (`vslot`)** = a buffer-local index unique per `(sample_id, channel)`. It is the binding handle for D4: the same random orthonormal ID and the same normalization stats attach to every tier token *and* every query token of one variate via `vslot`.
+**Variate id (`variate_uid`)** = a buffer-local id unique per `(sample_id, channel)`. It is the binding handle for D4: the same random orthonormal ID and the same normalization stats attach to every token (tier, query, KFF) of one variate via `variate_uid`.
 
-**Side tensors** (per token, batched `[B, L]` unless noted) — the *only* source of token geometry (D8 hard rule: **no buffer-index positional encoding anywhere**):
+**Side tensors** — the *only* source of token geometry (D8 hard rule: **no buffer-index positional encoding anywhere**). Full `Batch` field list (walkthrough Stage 4); per token `[B, L]` unless noted:
 
-| Name | dtype | Meaning |
+| Name | dtype / shape | Meaning |
 |---|---|---|
-| `sample_id` | int32 | D9 packing segment id; `-1` = pad |
-| `vslot` | int32 | variate slot (see above) |
-| `channel_idx` | int32 | channel within its sample (features first, then targets) |
-| `t_center` | float32 | continuous time vs forecast origin (negative = past, ≥0 = horizon) |
-| `span` | int8 | tier index 0..5 (≡ log₂ patch via PATCH) |
-| `role` | int8 | `{ctx, qry}` |
-| `role_ft` | int8 | `{feature, target}` (D11) |
-| `content_state` | int8 | `{observed, MASK, NA}` (D7) |
-| `valid` | bool | boundary + loss-validity (D7/D9) |
+| `sample_id` | int32 `[B,L]` | packing segment id within the buffer; `-1` = pad |
+| `channel_idx` | int32 `[B,L]` | channel within its sample (features first, then targets) |
+| `t_center` | float32 `[B,L]` | continuous time vs forecast origin (negative = past, ≥0 = horizon) |
+| `tier_id` | int8 `[B,L]` | 0–5; selects per-tier encoder & span embedding |
+| `role` | int8 `[B,L]` | `{CTX, QRY}` (D6/D9, drives the mask) |
+| `content_state` | int8 `[B,L]` | `{OBSERVED, MASK, NA}` (D7, selects content slot) |
+| `role_ft` | int8 `[B,L]` | `{FEATURE, TARGET}` (D11, added role embedding) |
+| `raw_start` | int32 `[B,L]` | offset into `norm_values[B,R]` for this token's window (`-1` unless OBSERVED) |
+| `variate_uid` | int32 `[B,L]` | per-(sample,channel) id → random orthonormal ID (D4) |
+| `valid_aux` | bool `[B,L]` | is the next-patch aux target well-defined here? (boundary/origin/NaN) |
+| `norm_values` | float32 `[B,R]` | per-buffer normalized raw store (base scale σΔ[0]); indexed by `raw_start` |
+| `observed` | bool `[B,R]` | observed-indicator for `norm_values` (D7) |
+| `stats_a`, `stats_sigma` | float32 `[B,L]` | per-token anchor & base scale (broadcast from `Stats`) for Stage-9 inversion |
+| `horizon_target` | float32 `[B,L,P_out]` | GT horizon patch per slot; real only at QUERY slots, rest masked (dense ⇒ static) |
+| `target_valid` | bool `[B,L,P_out]` | true only at QUERY slots with non-NaN GT |
 
 ---
 
@@ -67,7 +78,7 @@ tsfm-models/
   src/tetris/
     __init__.py
     config.py                    # dataclasses for every toggle; YAML<->dataclass
-    constants.py                 # PATCH vocab, ContentState/Role enums, dtypes
+    constants.py                 # PATCH vocab, enums Role/ContentState/RoleFT + ChannelRole, dtypes
     backend.py                   # backend switch: flex+compile (CUDA) | sdpa+eager (Mac)
 
     normalize.py                 # D10: anchored-arcsinh, fallback chain, per-tier σ_Δ,
@@ -80,7 +91,7 @@ tsfm-models/
       assemble.py                # raw->normalized patch windows + side tensors (pure, per spec)
 
     packing/
-      collator.py                # STATELESS pack(items, specs) -> PackedBatch  (the "collator")
+      collator.py                # STATELESS pack(items, specs) -> Batch  (the "collator")
       reservoir.py               # streaming IterableDataset: reservoir + best-fit-decreasing (D9.3)
       scheduler.py               # D9.4 cost-bucketed step grouping (Σ S_i²/2), cross-rank (multi-node)
 
@@ -88,7 +99,7 @@ tsfm-models/
 
     model/
       embeddings.py              # time/span/role/content-state embeddings (+ MASK/NA learned)
-      variate_id.py              # D4: random orthonormal IDs per vslot + content-summary MLP
+      variate_id.py              # D4: random orthonormal IDs per variate_uid + scale-receipt MLP(a,σΔ)
       encoders.py                # D3: six per-tier encoders; D14 grouped gather->encode->scatter
       attention.py               # attn(e, block_mask, score_mod=None); backend-routed
       blocks.py                  # transformer block (attn + FFN); pre-norm
@@ -118,7 +129,7 @@ tsfm-models/
     test_pack_invariance.py     # [UNIT GATE] packed==unpacked loss invariance (no buffer-index leakage)
     test_aux_boundary.py        # [REQUIRED] raw-time aux validity: origin-crossing & history-edge masking
     test_synthetic.py           # generators honor contract; cross-channel structure present
-    test_collator_shapes.py     # PackedBatch shapes/capacities; specs predict sizes exactly
+    test_collator_shapes.py     # Batch shapes/capacities; specs predict sizes exactly
     test_encoders.py            # grouped per-tier dispatch correctness (part of telescope gate)
     test_model_smoke.py         # forward finite; one static graph (no recompiles)
     test_distributed.py         # single-process == 2-rank per-sample loss; disjoint shards; ckpt restore
@@ -132,34 +143,36 @@ base loader item:           (data_tensor [n_i, t_i] float32, num_features int, n
                             n_i = num_features + num_targets (features first); raw, may contain NaN
 
 window_sampler(item,rng) -> SegmentSpec:
-                            { origin, p, per_channel_tier_counts [C_i, 6], Q, S (segment length),
-                              channel roles (role_ft), demotion/KFF flags (D11) }
-                            S is exact from the spec alone (D9: packable without tokenizing)
+                            { C, n_features, n_targets, origin, p, channel_roles[C],
+                              Q, K, Q_total, n, counts[6] }   # channel_roles ∈ {FEATURE,TARGET,KFF}
+                            S = C·Σcounts + Q_total, exact from the spec alone (D9: packable w/o tokenizing)
+
+assemble(item, spec, P_out) -> AssembledSegment (pure; walkthrough Stages 2–3):
+                            per-token (len S): tier_id, channel, raw_start, role, content_state,
+                              role_ft, variate_uid, t_center, valid_aux
+                            flat store: norm_values[R_seg], observed[R_seg]   (base scale σΔ[0])
+                            per-channel: stats_a[C], stats_sigma_delta[C,6]
+                            dense GT: horizon_target[S,P_out], target_valid[S,P_out]
 
 reservoir IterableDataset -> List[(item, spec)]  (a chosen pack-group; ~B buffers' worth)
 
-pack(items, specs)       -> PackedBatch:
-  side tensors            : sample_id, vslot, channel_idx, t_center, span, role, role_ft,
-                            content_state, valid                       each [B, L]
-  per-tier encoder inputs : tier_input[k]   [B, cap_k, PATCH[k], 2]    (value, observed-indicator; D7)
-                            tier_scatter[k] [B, cap_k]  (dest pos in [0,L))
-                            tier_valid[k]   [B, cap_k]
-  variate material        : var_id_table   [B, C_slot, d]   (orthonormal rows, resampled per sample; D4)
-                            var_feats       [B, C_slot, F]    (content-summary stats; D4/D10 receipts)
-  norm stats (inversion)  : norm_a [B, C_slot], norm_sigma [B, C_slot], norm_sigma_tier [B, C_slot, 6]
-  loss indices            : qry_idx [B, Q_max], qry_valid [B, Q_max],
-                            qry_target [B, Q_max, P_out], qry_target_valid [B, Q_max, P_out]
-                            aux_target  per-tier raw-time region (tier-k granularity), aux_valid [B, L]
-                              # tier-k token covering raw [t,t+P_k) -> target = next P_k raw steps
-                              #   [t+P_k, t+2P_k) aggregated to tier-k granularity (built by collator)
+pack(...) -> Batch (all static at L; see §1 side-tensor table):
+  side tensors            : sample_id, channel_idx, t_center, tier_id, role, content_state,
+                            role_ft, raw_start, variate_uid, valid_aux       each [B, L]
+  raw store               : norm_values [B, R], observed [B, R]
+  inversion stats         : stats_a [B, L], stats_sigma [B, L]
+  dense horizon GT        : horizon_target [B, L, P_out], target_valid [B, L, P_out]
 
-model.forward(PackedBatch) :
-  embeddings              : e [B, L, d]   (content_enc + time + span + variate + role + state)
+model.forward(Batch) :
+  content (Stage 7)       : route content_state==OBSERVED by tier — encoderₖ [CAP, P_k, 2]→[CAP, d],
+                            scatter → [B, L, d]; MASK/NA slots get learned [MASK]/[NA] vectors
+  embeddings (Stage 6)    : e = content + time(t_center) + span(tier_id) + variate(variate_uid) + role_ft
   backbone (n_layers ×)   : attn(e, block_mask) + FFN -> e [B, L, d]
-  horizon head            : gather qry_idx -> [B, Q_max, d] -> [B, Q_max, P_out]  (norm-increment space)
-  aux heads (per tier)    : [B, L, d] -> per-tier raw-time region preds in norm-increment space
+  horizon head (Stage 9)  : dense [B, L, d] -> [B, L, P_out]   (gather/mask at loss time)
+  aux heads (6, Stage 9)  : dense [B, L, d] -> [B, L, P_k] ×6; each token tier-selects its own
 
-losses.compute           : scalar  = MAE(horizon, masked) + Σ_k aux_weights[k]·MAE(aux_k, masked)
+losses.compute           : scalar  = horizon_MAE(masked by target_valid)
+                                      + λ·Σ_k aux_weights[k]·aux_MAE_k(masked by valid_aux)
 metrics                  : per-config test loss on deterministic first-100 shard (record-only; MASE deferred)
 ```
 
@@ -169,27 +182,27 @@ metrics                  : per-config test loss on deterministic first-100 shard
 
 ### `config.py`, `constants.py`, `backend.py`
 - **config:** nested dataclasses; load/merge YAML via OmegaConf. Surfaces all D10 axes (`input_norm ∈ {anchored_arcsinh, zscore_arcsinh}`, `loss_target ∈ {locally_reanchored, global_norm_space}`, `loss_space ∈ {arcsinh, vol_units}`), D13 `dataset_weights {id: multiplier}` + `phase2_*`, D15 `loss_weighting`, the per-tier `aux_weights [6]` vector (replaces a single λ), and the `distributed` block (§9). **Every combination must run** (D10 mandate).
-- **constants:** `PATCH=(4,8,16,64,256,512)`, enums `ContentState{OBSERVED,MASK,NA}`, `Role{CTX,QRY}`, `RoleFT{FEATURE,TARGET}`.
+- **constants:** `PATCH=(4,8,16,64,256,512)`, enums `Role{CTX,QRY}` (D6/D9), `ContentState{OBSERVED,MASK,NA}` (D7), `RoleFT{FEATURE,TARGET}` (D11), `ChannelRole{FEATURE,TARGET,KFF}` (spec-level).
 - **backend:** `attend(q,k,v, block_mask, score_mod)` dispatch. CUDA → `flex_attention` + compiled; else → `F.scaled_dot_product_attention` with materialized `[L,L]` bool mask. `make_mask(side_tensors)` returns the matching object for each backend. Single seam where compile/Flex is opt-in.
 
 ### `normalize.py` (D10)
-- `compute_stats(x_ctx)` → `(a, σ_Δ, σ_Δ_tier[6])`. `a = median(last 32)` (window size is a tuning knob, 8–16 for steep trends). `σ_Δ = 1.4826·median|Δx|` with fallback chain `mean|Δx| → IQR/1.349 → 1`, plus floor `σ_Δ ≥ 1e-3·IQR/1.349`. Per-tier σ_Δ from each tier's aggregated sequence.
+- `compute_stats(x_ctx)` → `Stats{a: float, sigma_delta: float[6]}` (per-(sample,channel) constants). `a = median(last 32)` (window 8–16 tunable). `sigma_delta[0] = 1.4826·median|Δx|` (the base scale, fallback chain `mean|Δx| → IQR/1.349 → 1`, floor `≥1e-3·IQR/1.349`) used for the input `norm_values` and Stage-9 inversion; `sigma_delta[1..5]` are per-tier scales (robust σ of each tier's aggregated sequence) for aux targets + D4 receipts. `.sigma` property = `sigma_delta[0]`.
 - `forward(x, a, σ)` → `arcsinh((x-a)/σ)`; `invert(z, a, σ)` → `sinh(z)·σ + a` (exact, denormalizes horizon preds; no leakage).
 - Loss-target builders: `aux_target(t) = arcsinh((x[t+1..t+P] - level_t)/σ_tier)`; `horizon_target(y) = arcsinh((y - a)/σ)`. `loss_target=global_norm_space` swaps in global-z targets (one-line, per D10 hedge).
-- Cross-channel receipts (D10): emit `log σ_Δ`, level relations, fallback-tier flag into `var_feats`.
+- Receipts (D4/D10): `(a, sigma_delta)` ride along on the segment (`stats_a`, `stats_sigma_delta`) and feed the variate scale-receipt MLP.
 
 ### `telescope.py` (D2/D12)
 - `allocate(n_tokens, T_raw)` → per-tier counts via a **tunable ratio prior (front-loaded, coarse-reaching)** — config `model.tier_alloc_per_channel`, normalized and scaled by `n` (default reproduces the design-point `[8,8,8,8,8,4]` at n=44; literal-halving `[0.5,0.25,…]` is an available ablation) — then rebalance to `coverage ≈ T_raw` (walk coarse→fine); deterministic integer ops.
 - `coverage(counts)` / `tokens_for_coverage(T)` — invert the ladder (used by D9.2: `n = ⌊(L−Q)/C⌋` → `T_cov`).
-- `build_dispatch(counts, origin)` → per-tier raw-window slices + **channel-major** scatter positions `pos = base + c·n + t`. Asserts `count_k ≤ cap_k`.
+- `build_dispatch(counts, origin)` → per-tier raw-window slices + **channel-major** scatter positions `pos = base + c·n + t`. Optional per-channel `caps` is a convenience guard; real capacity is the model's `ENCODER_CAP` (Stage 7).
 
-### `tokenize/` (D9.2)
-- `spec.py`: `SegmentSpec` carries everything needed to compute `S` and to assemble later; **no tokenization at packing time**.
-- `window_sampler.py`: sample `p ∈ [1, p_max]` (log-uniform, D13), `Q`, per-channel `n`, `T_cov`, **uniform random origin**; assign D11 role demotion / KFF reveal flags (crop-level prob `q≈0.2`). Stateless given an RNG; lives in the reservoir layer.
-- `assemble.py`: given `(item, spec)`, normalize per channel (D10), build per-tier patch windows `[·, PATCH[k], 2]` (value, observed-indicator), set `content_state` (observed/NA per patch; MASK for queries), fill side tensors. **Also constructs the raw-time aux targets** per tier token — for a tier-`k` token covering raw `[t, t+P_k)`, the target is the next `P_k` raw steps `[t+P_k, t+2P_k)` aggregated to tier-`k` granularity — and the precise `aux_valid` mask (origin-crossing and history-edge cases, see `losses.py`). Pure function — the heart of the collator.
+### `tokenize/` (walkthrough Stages 1–3)
+- `spec.py`: `SegmentSpec` with per-channel `channel_roles[C] ∈ {FEATURE,TARGET,KFF}`; `S` computable from the spec alone; **no tokenization at packing time**.
+- `window_sampler.py`: sample `q_tok`/variable-`p`, `Q/K/Q_total`, per-channel `n = ⌊(L−Q_total)/C⌋`, **uniform random origin**, counts via the ratio prior trimmed to history; build `channel_roles` (features-first; KFF-reveal among native features, D11 partial; demotion deferred). Stateless given an RNG; lives in the reservoir layer.
+- `assemble.py`: given `(item, spec, P_out)`, normalize per channel (D10, base scale σΔ[0]), build the **flat per-segment `norm_values`/`observed` store** + per-token `raw_start` (the gather store), emit per-token `role`/`content_state`/`role_ft` (fully-missing patch → `content_state=NA`; **KFF = observed CTX feature token at t>0**, D11), `stats_a`/`stats_sigma_delta`, and **dense `horizon_target[S,P_out]`/`target_valid`** (real only at query slots). Also sets `valid_aux` (raw-time origin-crossing/history-edge/observed check). Pure — the heart of the collator.
 
 ### `packing/`
-- `collator.py`: **stateless** `pack(items, specs) -> PackedBatch`. Best-fit placement of segments into `B` buffers of length `L`, channel-major, pad tail (`sample_id=-1`). Emits all tensors in §2.1. *This signature is frozen* — both the trivial path and the reservoir path call it unchanged.
+- `collator.py`: **stateless** `pack(...) -> Batch` (13 fields, §1). Best-fit placement of segments into `B` buffers of length `L`, channel-major, pad tail (`sample_id=-1`); concatenates per-segment `norm_values` into `[B,R]` and offsets each token's `raw_start`; scatters dense horizon GT into `[B,L,P_out]`. *Signature frozen* — both the trivial path and the reservoir path call it unchanged.
 - `reservoir.py`: `IterableDataset` wrapping a base loader: pulls items, runs `window_sampler`, keeps a reservoir of `K≈1000` specs (doubles as shuffle buffer), **best-fit-decreasing**, refills, yields pack-groups. *(Built in Stage 11, after the trivial path.)*
 - `scheduler.py`: D9.4 cost = `Σ S_i²/2`; window of 64–256 buffers sorted by cost → each global step formed from similar-cost buffers (giants travel together). Shapes unchanged.
 
@@ -197,15 +210,15 @@ metrics                  : per-config test loss on deterministic first-100 shard
 Truth table: `allow(q,k) = s[q]==s[k] AND ( (role[k]==ctx AND (role[q]==qry OR t[k]<=t[q])) OR (role[k]==qry AND role[q]==qry) )`. Pad (`s=-1`) gets a `q==k` self-attend exception (NaN guard; outputs discarded). Built once per batch, depth-invariant (v1). Two constructors: Flex `BlockMask` (`mask_mod`) and SDPA bool `[L,L]`; **equality-tested**. `score_mod` socket present, default `None` (A3 ladder hook).
 
 ### `model/`
-- `variate_id.py` (D4): sample `C_slot` rows of a random rotation (orthonormal → separation), resampled per sample (fixed seed at inference); `+` content-summary MLP over `var_feats`. Indexed by `vslot`.
-- `encoders.py` (D3/D14): six encoders (Fourier number-features → MLP/conv). **Grouped dispatch**: for each tier, `gather → [cap_k, PATCH[k], 2] → encode → scatter` into `[B, L, d]`. Static shapes, no Python branching in-graph.
-- `embeddings.py`: `e = content_enc + time_emb(t_center) + span_emb(span) + variate_emb(vslot) + role_emb(role_ft) + state_emb(content_state)`. MASK/NA are learned content embeddings (D7).
+- `variate_id.py` (D4): random orthonormal ID per `variate_uid` (resampled per sample; fixed seed at inference) `+` scale-receipt MLP over `(stats_a, stats_sigma_delta)`.
+- `encoders.py` (D3/Stage 7): six encoders (Fourier number-features → MLP/conv) of native widths `P_k`. **Index-routed dispatch at static `ENCODER_CAP`**: for each tier, route slots with `content_state==OBSERVED` & `tier_id==k` (context + KFF; ≤CAP, sentinel-padded) → gather `[CAP, P_k, 2]` windows from `norm_values` via `raw_start` → `encoderₖ → [CAP, d]` → scatter into `content [B, L, d]`. `MASK`/`NA` slots get learned `[MASK]`/`[NA]` vectors. Pad token-count only, keep native `P_k`.
+- `embeddings.py` (Stage 6): `e = content + time_emb(t_center) + span_emb(tier_id) + variate_emb(variate_uid) + role_ft_emb(role_ft)` (5 parts). `content` = encoder output | learned `[MASK]` | learned `[NA]`, selected by `content_state` (D7); CTX/QRY is structural (mask + content), not an added vector.
 - `attention.py`: `attn(e, block_mask, score_mod=None)` → QKV proj `[B,H,L,d_h]` → backend `attend`. **`block_mask` is a parameter** (per-layer schedule = future arg, not refactor).
 - `blocks.py` / `tetris.py`: pre-norm blocks; full forward assembles §2.1.
-- `heads.py`: horizon head gathers `qry_idx` → `[B,Q_max,P_out]` (norm-increment space). **Six per-tier aux heads** (mirror encoders; grouped scatter). A tier-`k` aux head predicts the **next raw region in tier-time**: for a token covering raw `[t, t+P_k)`, the target is the next `P_k` raw steps `[t+P_k, t+2P_k)` aggregated to tier-`k` granularity (built by the collator from the raw series). Output width = the tier's own granularity → **no cross-tier width mismatch** (e.g. no patch-8→patch-4 conflict) and **no dependence on whatever token happens to follow** in channel-major order. This replaces the "next token" framing.
+- `heads.py` (Stage 9, dense — no gather): horizon head runs over all `L`, `[B,L,d]→[B,L,P_out]`. **Six per-tier aux heads** each run dense `[B,L,d]→[B,L,P_k]`; each token tier-selects its own output. A tier-`k` aux target is the next `P_k` raw steps `[t+P_k, t+2P_k)` at tier-`k` granularity (collator-built). Selection/masking happen in the loss reduction, so shapes stay static.
 
 ### `losses.py` (D6/D10)
-MAE horizon (median-optimal) on `qry_target` masked by `qry_target_valid` (NaN GT dropped, D7). `+` **per-tier-weighted** aux MAE (`aux_weights[6]` config vector replaces a single λ) on the raw-time `aux_target` masked by `aux_valid`. **Aux validity is a precise raw-time check** (replacing D9.5's `span[p+1]==span[p]` proxy): the aux term for a tier-`k` token is masked when its target region `[t+P_k, t+2P_k)` **(a) crosses the forecast origin** (tier-0 edge — that region is the horizon task, owned by query tokens) or **(b) runs off available history** (oldest-tier edge — partial/unavailable patch), plus the D7 mostly-missing-patch skip. `loss_space ∈ {arcsinh, vol_units}` toggle. Per-sample normalized influence (σ_Δ scaling ≈ MASE-aligned).
+Horizon MAE (median-optimal) run dense `[B,L,P_out]` and masked by `target_valid` (NaN GT dropped, D7): `(|pred−tgt|·valid).sum()/valid.sum()`. `+` **per-tier-weighted** aux MAE (`aux_weights[6]` vector replaces a single λ): six dense tier-heads, each token picks its own tier's output, masked by `valid_aux`. **`valid_aux` is a precise raw-time check** (replacing D9.5's `span[p+1]==span[p]` proxy): the tier-`k` aux term is masked when its region `[t+P_k, t+2P_k)` **(a) crosses the origin** (horizon's job) or **(b) runs off history** (partial/unavailable), plus the D7 mostly-missing skip. `loss_space ∈ {arcsinh, vol_units}` toggle. Per-sample normalized influence (σ_Δ ≈ MASE-aligned).
 
 > **Overlapping cross-resolution supervision (accepted, OA):** a coarse token's target region can overlap raw steps also supervised by finer, more-recent tokens. This is legitimate (predictions from different origins/resolutions), not double-counting a bug; the per-tier `aux_weights` vector damps it. Verified by `test_pack_invariance` (overlap must not depend on layout) and `test_aux_boundary`.
 
@@ -228,10 +241,10 @@ The four mandatory pre-training gates are **S1, S2, S5, S9**.
 | **S1** | `normalize.py` | **[GATE] `test_normalize`**: `invert(forward(x))≈x` (tol) across 8 synthetic series incl. extremes; fallback chain triggers (constant→zeros, intermittent→mean\|Δx\|); per-tier σ; loss-target/inverse consistency. |
 | **S2** | `telescope.py`, `encoders` dispatch index build | **[GATE] `test_telescope`**: allocation ≤ budget & coverage≈T_raw; channel-major positions collision-free; `scatter(gather(x))` round-trips; `cap_k` asserts. (`test_encoders` covers grouped encode dispatch.) |
 | **S3** | `synthetic.py`, `standin_loader.py`, `contract.py` | `test_synthetic`: items honor exact `(float32 [n,t], int, int)` contract, features-first, NaNs present, `n`/`t` vary; shared-factor channels show measurable cross-correlation; lag-probe planted. |
-| **S4** | `tokenize/` (spec, window_sampler, assemble) | Spec-predicted `S` equals assembled length exactly; origin/`p`/counts within bounds; content_state assignment correct. |
+| **S4** | `tokenize/` (spec, window_sampler, assemble) | Spec-predicted `S` equals assembled length exactly; origin/`p`/counts within bounds; 3-enum tagging correct (role CTX/QRY, content_state OBSERVED/MASK/NA, role_ft FEATURE/TARGET; KFF = observed CTX feature @ t>0); flat `norm_values`+`raw_start` gather in-bounds; dense `horizon_target`; capacity under `ENCODER_CAP`. |
 | **S5** | `masks.py` | **[GATE] `test_masks`**: enumerate small grid; assert every `(q,k)` matches the boolean formula (ctx→ctx causal+channel-blind; qry→ctx always; qry→qry both ways; ctx→qry never; pad self-only). Flex `BlockMask` == SDPA bool. |
 | **S6** | `packing/collator.py` (trivial no-reservoir collate_fn) | `test_collator_shapes`: packs DataLoader's list into `[B,L]` buffers; all side tensors + capacities present; tail pad `sample_id=-1`. |
-| **S7** | `model/` (embeddings, variate_id, encoders, attention, blocks, heads, tetris) | `test_model_smoke`: forward on one packed buffer → finite `[B,Q_max,P_out]` + aux; both backends. |
+| **S7** | `model/` (embeddings, variate_id, encoders, attention, blocks, heads, tetris) | `test_model_smoke`: forward on one packed buffer → finite dense `[B,L,P_out]` horizon + `[B,L,P_k]×6` aux; both backends; encoders at static `ENCODER_CAP`. |
 | **S8** | `losses.py`, `metrics.py` | Loss finite & differentiable; NaN-GT and missing-patch positions contribute zero; **test loss** on a toy shard (MASE deferred, O4). **`test_aux_boundary`** (required): aux term zeroed exactly when the raw-time target region crosses the origin or runs off history; per-tier `aux_weights` applied. |
 | **S9** | (integration of S6–S8) | **[GATE] `test_pack_invariance`**: identical samples packed together vs in solo buffers → **identical per-sample loss and per-token outputs** (permutation + packing invariance). Keystone guard against the D8 buffer-index-leakage bug; also confirms cross-resolution aux overlap (OA) is layout-independent. |
 | **S10** | `train/step.py`, `train/shakedown.py` | Run `shakedown.yaml`: 50–200 steps on synthetic; loss decreases; **no recompiles** (assert via `torch._dynamo` recompile counter); CUDA path under `torch.compile`. |
@@ -315,7 +328,8 @@ model:
   n_heads: 2
   patch_vocab: [4, 8, 16, 64, 256, 512]
   out_patch: 8
-  tier_caps: [16, 12, 8, 6, 4, 2]   # cap_k, generous headroom over alloc
+  tier_alloc_per_channel: [16, 12, 8, 6, 4, 2]   # ratio prior (scaled by n), NOT literal counts
+  encoder_cap: 0                    # 0 -> L_pack; static ENCODER_CAP
 data:
   loader: standin_pretrain
   C_distribution: [1, 8]            # univariate..small multivariate
@@ -380,10 +394,10 @@ Designed in from the start; the seams below are honored from Stage 6 onward and 
 D12's `[8,8,8,8,8,4]` was derived for the C=21 design point and never disambiguated between *per-channel* and *per-buffer*; those scale oppositely as C varies, so the literal vector cannot be a static cap. Resolution — decouple two concepts the config conflated:
 
 - **Per-tier counts are dynamic per-segment data, not config constants.** Per-channel budget `n = ⌊(L_pack − Q)/C⌋` (D9). Distribute `n` across the 6 tiers by a **ratio prior** (config `model.tier_alloc_per_channel`, normalized), tuned so `n=44` reproduces `[8,8,8,8,8,4]`. Rebalance against `T_raw` (coarse→fine) so a long univariate crop piles tokens into the finer tiers it can fill and a short/high-C crop collapses to 1–2 tiers. Counts sum to ≤ `n` per channel and ≤ `L_pack` per buffer, and vary every buffer. Computed in `telescope.allocate` / `window_sampler`.
-- **Dispatch capacity is static, routed by indices (MoE trick), not padded per-tier value tensors.** A `[B, cap_k, PATCH_k, 2]` value tensor would have to be ≈`L_pack`-sized per tier (worst case: a univariate buffer that is mostly one tier) → massive padding waste. Instead: one static context-slot space `n_ctx_cap ≈ L_pack − max_Q` (config `model.n_ctx_cap`, `0` → `L_pack`); per tier a **1-D static index tensor `tier_idx[k]` `[B, cap_k]`** (sentinel-padded) selecting which slots are tier-`k`; dispatch = gather slots → `encoder_k` → scatter back. Over-provisioning 1-D int indices is cheap, so `cap_k` is a generous static bound (≈`n_ctx_cap`) and "univariate fills the buffer" just works.
-- **Config rename:** `tier_caps` → `model.tier_alloc_per_channel` (ratio prior, scaled by `n` at runtime — *not* literal counts/caps); add scalar `model.n_ctx_cap` (resolver `config.resolved_n_ctx_cap`). Per-tier `cap_k` for the index tensors derive from `n_ctx_cap`, not from the per-channel allocation.
-- **`telescope.build_dispatch`:** the `counts[k] <= caps[k]` assert is a *convenience guard*; real enforcement is buffer-level `Σ context tokens ≤ n_ctx_cap` (collator).
-- **Verification:** `test_tokenize::test_capacity_univariate_and_21ch_same_n_ctx_cap` (a long univariate crop and a 21-channel crop both dispatch under one static `n_ctx_cap`); dynamic-count layout-independence is the keystone `test_pack_invariance` (S9).
+- **Dispatch capacity is static (`ENCODER_CAP` = L), values from the flat store, not persisted padded per-tier value tensors.** Persisting a `[B, cap_k, P_k, 2]` value tensor per tier would be ≈`L_pack`-sized per tier (worst case: a univariate buffer mostly one tier) → massive padding waste. Instead the buffer ships the **flat `norm_values[B,R]`/`observed[B,R]` store + per-token `raw_start`** (cheap, 1-D); Stage-7 routing picks slots with `role∈{CTX,KFF}` & `tier_id==k` (≤`ENCODER_CAP`, sentinel-padded) and **gathers `[CAP, P_k, 2]` transiently** from the store → `encoderₖ → [CAP,d]` → scatter. The transient gather is freed immediately; over-provisioning to `CAP=L` costs ~6% extra compute (walkthrough Stage 7). "Univariate fills the buffer" just works — no per-tier cap, no dropped tokens, no coverage capping.
+- **Config rename:** `tier_caps` → `model.tier_alloc_per_channel` (ratio prior, scaled by `n` at runtime — *not* literal counts/caps); `n_ctx_cap` → `model.encoder_cap` (= `ENCODER_CAP`, `0` → `L_pack`; resolver `config.resolved_encoder_cap`).
+- **`telescope.build_dispatch`:** the optional per-channel `counts[k] <= caps[k]` assert is a *convenience guard*; real enforcement is the static `ENCODER_CAP` in Stage-7 routing.
+- **Verification:** `test_tokenize::test_capacity_univariate_and_21ch_same_encoder_cap` (a long univariate crop and a 21-channel crop both dispatch under one static `ENCODER_CAP`); dynamic-count layout-independence is the keystone `test_pack_invariance` (S9).
 
 ## Notes intentionally carried forward (do not re-flag)
 

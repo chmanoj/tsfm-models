@@ -1,37 +1,41 @@
-"""S4 test_tokenize — window sampler + assemble.
+"""S4 test_tokenize — window sampler + assemble (walkthrough Stages 1–3).
 
-Covers: spec-predicted S equals assembled length exactly; origin/p/counts within
-bounds; content_state assignment correct (query→MASK, observed→OBSERVED,
-fully-missing→NA). Plus the mandated capacity test: a long univariate crop AND a
-21-channel crop both dispatch correctly under the same static n_ctx_cap
-(counts-vs-capacity split).
+Covers: spec-predicted S equals assembled length; origin/p/counts within bounds;
+3-enum tagging (role CTX/QRY, content_state OBSERVED/MASK/NA, role_ft FEATURE/
+TARGET); KFF = observed CTX feature token at t>0; flat norm store + raw_start
+gather correctness; dense horizon targets; stats shapes; the mandated capacity
+test (long univariate + 21-channel under one static ENCODER_CAP).
 """
 
 import numpy as np
 import torch
 
-from tetris.constants import ContentState, PATCH, Role, RoleFT, V
+from tetris.constants import ChannelRole, ContentState, PATCH, Role, RoleFT, V
 from tetris.tokenize.assemble import assemble
 from tetris.tokenize.window_sampler import SamplerParams, sample_window
 import tetris.telescope as TS
 
 BASE_PRIOR = (16, 16, 16, 16, 16, 8)
+P_OUT = 16
 
 
-def _params(l_pack=1024, p_out=16, **kw):
+def _params(l_pack=1024, p_out=P_OUT, **kw):
     return SamplerParams(l_pack=l_pack, p_out=p_out, tier_prior=BASE_PRIOR, **kw)
 
 
 def _uni(T, seed=0):
     g = torch.Generator().manual_seed(seed)
-    x = torch.cumsum(torch.randn(T, generator=g), dim=0).to(torch.float32)
-    return (x[None, :], 0, 1)
+    return (torch.cumsum(torch.randn(T, generator=g), dim=0).to(torch.float32)[None, :], 0, 1)
 
 
 def _multi(C, T, seed=0):
     g = torch.Generator().manual_seed(seed)
-    x = torch.randn(C, T, generator=g).cumsum(dim=1).to(torch.float32)
-    return (x, 0, C)
+    return (torch.randn(C, T, generator=g).cumsum(dim=1).to(torch.float32), 0, C)
+
+
+def _routed(seg):
+    """Encoder-routed tokens = content_state OBSERVED (context + KFF)."""
+    return seg.content_state == int(ContentState.OBSERVED)
 
 
 def test_spec_S_equals_assembled_length():
@@ -42,13 +46,13 @@ def test_spec_S_equals_assembled_length():
         T = int(rng.integers(64, 6000))
         item = _multi(C, T, seed)
         spec = sample_window(0, C, T, params, rng)
-        seg = assemble(item, spec)
+        seg = assemble(item, spec, P_OUT)
         assert seg.S == spec.S
-        # every position is assigned exactly once (no holes, no -1)
-        assert (seg.channel_idx >= 0).all()
-        # encoder-routed tokens (context + KFF horizon) + queries == S
-        routed = sum(int(p.size) for p in seg.tier_pos)
-        assert routed + seg.qry_pos.size == seg.S
+        assert (seg.channel >= 0).all()                       # every slot assigned
+        # observed tokens carry a raw_start; MASK/NA do not
+        assert (seg.raw_start[_routed(seg)] >= 0).all()
+        not_obs = seg.content_state != int(ContentState.OBSERVED)
+        assert (seg.raw_start[not_obs] == -1).all()
 
 
 def test_origin_p_counts_within_bounds():
@@ -60,67 +64,111 @@ def test_origin_p_counts_within_bounds():
         spec = sample_window(0, C, T, params, rng)
         assert 1 <= spec.origin <= T - spec.p
         assert 1 <= spec.p <= params.q_tok_max * params.p_out
-        assert len(spec.counts) == V and sum(spec.counts) == spec.n_eff
-        assert all(c >= 0 for c in spec.counts)
-        nc = spec.n_horizon_obs + spec.Q
-        assert spec.n_eff <= (params.l_pack - nc) // C
-        # coverage cannot exceed available history (no pre-start tokens)
+        assert len(spec.counts) == V and 0 < spec.n_eff <= spec.n
+        assert spec.Q_total == spec.Q + spec.K
+        assert spec.n == (params.l_pack - spec.Q_total) // C
+        assert len(spec.channel_roles) == C
         assert TS.coverage(spec.counts) <= spec.origin + PATCH[-1]
 
 
-def test_content_state_assignment():
-    # No role augmentation, no NaN → context OBSERVED, horizon all queries (MASK).
-    params = _params(role_aug_prob=0.0)
+def test_raw_start_gather_in_bounds():
+    # Each routed token's P_k window must lie inside the segment's norm store.
+    params = _params()
+    rng = np.random.default_rng(5)
+    item = _multi(6, 4000, seed=9)
+    spec = sample_window(0, 6, 4000, params, rng)
+    seg = assemble(item, spec, P_OUT)
+    R = seg.norm_values.shape[0]
+    assert seg.observed.shape == (R,)
+    for pos in np.nonzero(_routed(seg))[0]:
+        Pk = PATCH[int(seg.tier_id[pos])]
+        rs = int(seg.raw_start[pos])
+        assert 0 <= rs and rs + Pk <= R
+
+
+def test_enum_tagging_and_horizon_targets():
+    # No NaN, all-target → context CTX/OBSERVED/TARGET, horizon QRY/MASK/TARGET.
+    params = _params()
     rng = np.random.default_rng(7)
     item = _multi(4, 3000, seed=11)
     spec = sample_window(0, 4, 3000, params, rng)
-    seg = assemble(item, spec)
-    is_qry = seg.role == int(Role.QRY)
-    is_ctx = seg.role == int(Role.CTX)
-    assert (seg.content_state[is_qry] == int(ContentState.MASK)).all()
-    assert (seg.content_state[is_ctx] == int(ContentState.OBSERVED)).all()
-    # queries only on target channels; all 4 channels are targets here
-    assert (seg.role_ft[is_qry] == int(RoleFT.TARGET)).all()
-    assert seg.qry_pos.size == spec.n_target_eff * spec.q_tok
+    seg = assemble(item, spec, P_OUT)
+    is_q = seg.role == int(Role.QRY)
+    assert is_q.sum() == spec.Q
+    assert (seg.content_state[is_q] == int(ContentState.MASK)).all()
+    assert (seg.role_ft[is_q] == int(RoleFT.TARGET)).all()
+    assert (seg.tier_id[is_q] == PATCH.index(P_OUT)).all()
+    assert (seg.t_center[is_q] >= 0).all()
+    # context tokens: CTX/OBSERVED (no missingness injected), t<0
+    ctx = ~is_q
+    assert (seg.role[ctx] == int(Role.CTX)).all()
+    assert (seg.content_state[ctx] == int(ContentState.OBSERVED)).all()
+    assert (seg.t_center[ctx] < 0).all()
+    # dense horizon GT real only at query slots
+    assert seg.horizon_target.shape == (seg.S, P_OUT)
+    assert not seg.target_valid[~is_q].any()
+    assert seg.target_valid[is_q].any()
+
+
+def test_kff_is_observed_ctx_feature_at_future_time():
+    # A feature channel revealed known-future → KFF tokens: role CTX, content
+    # OBSERVED, role_ft FEATURE, t>0, routed to the P_out encoder. No KFF enum.
+    params = _params(kff_reveal_prob=1.0)
+    rng = np.random.default_rng(2)
+    g = torch.Generator().manual_seed(1)
+    x = torch.randn(2, 1200, generator=g).cumsum(dim=1).to(torch.float32)
+    spec = sample_window(1, 1, 1200, params, rng)   # 1 feature, 1 target
+    assert spec.channel_roles[0] == int(ChannelRole.KFF)
+    assert spec.n_kff == 1 and spec.K == spec.q_tok
+    seg = assemble((x, 1, 1), spec, P_OUT)
+    # KFF tokens = future-time, CTX, OBSERVED, FEATURE, P_out tier
+    kff = (seg.channel == 0) & (seg.t_center > 0)
+    assert kff.sum() == spec.K
+    assert (seg.role[kff] == int(Role.CTX)).all()
+    assert (seg.content_state[kff] == int(ContentState.OBSERVED)).all()
+    assert (seg.role_ft[kff] == int(RoleFT.FEATURE)).all()
+    assert (seg.tier_id[kff] == PATCH.index(P_OUT)).all()
+    assert (seg.raw_start[kff] >= 0).all()
+    # KFF never produces query/horizon-target rows
+    assert not seg.target_valid[kff].any()
 
 
 def test_fully_missing_patch_becomes_na():
-    params = _params(role_aug_prob=0.0)
+    params = _params()
     rng = np.random.default_rng(3)
     x = torch.randn(1, 2000).cumsum(dim=1).to(torch.float32)
-    # blank a contiguous recent window fully -> at least one tier-0 patch all-NaN
-    x[0, 1900:1980] = float("nan")
+    x[0, 1900:1990] = float("nan")  # blank a recent window fully
     spec = sample_window(0, 1, 2000, params, rng)
-    seg = assemble((x, 0, 1), spec)
-    # if any token's window fell entirely in the blanked region it must be NA
-    assert int(ContentState.NA) in set(seg.content_state.tolist()) or not np.isnan(
-        x.numpy()[0, max(0, spec.origin - TS.coverage(spec.counts)):spec.origin]
-    ).any()
+    seg = assemble((x, 0, 1), spec, P_OUT)
+    ctx_lo = max(0, spec.origin - TS.coverage(spec.counts))
+    blanked = np.isnan(x.numpy()[0, ctx_lo:spec.origin]).any()
+    assert (int(ContentState.NA) in set(seg.content_state.tolist())) or (not blanked)
 
 
-def test_capacity_univariate_and_21ch_same_n_ctx_cap():
-    # counts-vs-capacity split: both crops dispatch under one static n_ctx_cap.
+def test_stats_shapes():
+    params = _params()
+    rng = np.random.default_rng(8)
+    spec = sample_window(0, 5, 2000, params, rng)
+    seg = assemble(_multi(5, 2000, seed=4), spec, P_OUT)
+    assert seg.stats_a.shape == (5,)
+    assert seg.stats_sigma_delta.shape == (5, V)
+    assert np.isfinite(seg.stats_a).all() and (seg.stats_sigma_delta > 0).all()
+
+
+def test_capacity_univariate_and_21ch_same_encoder_cap():
     L_pack = 1024
-    n_ctx_cap = L_pack  # default resolution (0 -> L_pack)
-    params = _params(l_pack=L_pack, p_out=16)
-
-    cases = [_uni(50000, seed=1), _multi(21, 8000, seed=2)]
-    for item in cases:
-        C = item[0].shape[0]
-        T = item[0].shape[1]
+    cap = L_pack  # ENCODER_CAP default (0 -> L_pack)
+    params = _params(l_pack=L_pack, p_out=P_OUT)
+    for item in [_uni(50000, seed=1), _multi(21, 8000, seed=2)]:
+        C, T = item[0].shape
         rng = np.random.default_rng(C)
         spec = sample_window(item[1], item[2], T, params, rng)
-        seg = assemble(item, spec)
-        # total buffer occupancy fits L_pack
+        seg = assemble(item, spec, P_OUT)
         assert seg.S <= L_pack
-        # encoder-routed tokens (one per context/KFF slot) fit the static slot space
-        routed = sum(int(p.size) for p in seg.tier_pos)
-        assert routed <= n_ctx_cap
-        # every tier's index tensor (length cap_k = n_ctx_cap) holds its tokens
+        routed = _routed(seg)
+        assert routed.sum() <= cap
         for k in range(V):
-            assert seg.tier_pos[k].size <= n_ctx_cap
-            assert seg.tier_values[k].shape == (seg.tier_pos[k].size, PATCH[k])
-    # the 21-channel crop reproduces the D12 design point envelope
+            assert int((seg.tier_id[routed] == k).sum()) <= cap
     rng = np.random.default_rng(2)
     spec21 = sample_window(0, 21, 8000, params, rng)
-    assert 21 * spec21.n_eff <= n_ctx_cap
+    assert 21 * spec21.n_eff <= cap

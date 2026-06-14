@@ -185,10 +185,11 @@ def build_dispatch(
     ``[channel_base, channel_base + Σcounts)`` ⊆ ``[channel_base, channel_base + n_per_channel)``.
 
     ``caps`` is an optional *convenience* guard (asserts ``counts[k] <= caps[k]``).
-    The real static-capacity enforcement is buffer-level — ``Σ context tokens ≤
-    n_ctx_cap`` — and lives in the collator (per the counts-vs-capacity split):
-    per-tier index tensors are sized to ``n_ctx_cap``, so any single tier can hold
-    up to the whole context budget (e.g. a univariate buffer that is mostly one tier).
+    The real static-capacity enforcement is the per-tier encoder dispatch capacity
+    ``ENCODER_CAP`` (= L by default), applied in the model's Stage-7 routing: each
+    encoder runs ``[CAP, P_k, 2]→[CAP, D]`` with sentinel padding, so any single
+    tier can hold up to the whole context budget (e.g. a univariate buffer that is
+    mostly one tier) with no dropped tokens.
     """
     counts = [int(c) for c in counts]
     if caps is not None:

@@ -14,7 +14,7 @@ model:
   patch_vocab: [4, 8, 16, 64, 256, 512]
   out_patch: 8
   tier_alloc_per_channel: [16, 12, 8, 6, 4, 2]   # ratio prior (scaled by n at runtime), NOT literal counts
-  n_ctx_cap: 0                      # 0 -> L_pack; static MoE dispatch slot space
+  encoder_cap: 0                    # 0 -> L_pack; static per-tier encoder dispatch capacity (ENCODER_CAP)
 data:
   loader: standin_pretrain
   C_distribution: [1, 8]            # univariate..small multivariate
