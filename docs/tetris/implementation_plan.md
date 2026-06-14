@@ -9,6 +9,34 @@
 - **Everything compiles at static shape `L`.** No per-batch `Qmax`. `horizon_target`/`target_valid` are dense `[B,L,P_out]`; encoders run at static `ENCODER_CAP` (config `model.encoder_cap`, default `L`), `[CAP,P_k,2]→[CAP,D]`, sentinel-padded; heads run dense over all `L`, gather/mask at loss time. The encoder input "2" = (normalized value, observed-indicator) per timestep (D7). Encoder-routed tokens are exactly `content_state==OBSERVED`.
 - **Attention mask (S5)** is the decision-log D9 truth table (KFF behaves as CTX: queries read it, it never attends queries). Earlier `tier_caps`→`tier_alloc_per_channel` (ratio prior) and `n_ctx_cap`→`encoder_cap` (= `ENCODER_CAP`).
 
+**Collator reconciliation (post-S6 — pinned, do not re-flag):** the plan §2.1 once
+wrote `pack(items, specs)`; the **walkthrough Stage 4** (`collate` over *already
+assembled* per-segment inputs) wins. The frozen signature is:
+
+```
+pack(buffers: list[list[AssembledSegment]], *, l_pack, p_out, num_buffers=None) -> Batch
+```
+
+- **Input = assembled segments**, not raw `(item, spec)`. `assemble()` (S4) runs
+  first; `pack` does **no** tokenization.
+- **Caller owns buffer grouping.** `pack` is pure tensor materialization of a
+  *pre-grouped* `list[list[AssembledSegment]]` (one inner list per buffer); it does
+  **no** best-fit packing. Best-fit-decreasing lives solely in the reservoir (S11);
+  the trivial path (S6/S10) and the reservoir path both call this same frozen `pack`.
+- **`Batch` is the 16-field record** (walkthrough Stage 4 = §1 table; the stale
+  "13 fields" was a miscount). Implemented as a dataclass of CPU `torch` tensors
+  (matches `AssembledSegment`/`SegmentSpec` style; `.to(device)` in the loop).
+- **Per-segment → buffer-global rebasing in `pack`:** `raw_start` offset by the
+  segment's base in the buffer's concatenated `norm_values` store; `variate_uid`
+  offset so every `(sample, channel)` is **buffer-unique** (D4); `stats_a`/
+  `stats_sigma` broadcast per token from `(a, σΔ[0])`. `channel_idx` stays
+  **sample-local** (unlike `variate_uid`).
+- **`R` = max per-buffer store length, ragged→padded** (the only non-`L`-bounded
+  dim, walkthrough Stage 3). Pad tokens get `sample_id=-1`, `content_state=NA`
+  (so they never route to an encoder), `raw_start=-1`, `variate_uid=-1`.
+- **No `aux_target` Batch field.** Aux targets are gathered from `norm_values` at
+  loss time (S8) — the collator carries only `valid_aux`.
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).
@@ -91,7 +119,7 @@ tsfm-models/
       assemble.py                # raw->normalized patch windows + side tensors (pure, per spec)
 
     packing/
-      collator.py                # STATELESS pack(items, specs) -> Batch  (the "collator")
+      collator.py                # STATELESS pack(buffers: list[list[AssembledSegment]]) -> Batch
       reservoir.py               # streaming IterableDataset: reservoir + best-fit-decreasing (D9.3)
       scheduler.py               # D9.4 cost-bucketed step grouping (Σ S_i²/2), cross-rank (multi-node)
 
@@ -154,9 +182,11 @@ assemble(item, spec, P_out) -> AssembledSegment (pure; walkthrough Stages 2–3)
                             per-channel: stats_a[C], stats_sigma_delta[C,6]
                             dense GT: horizon_target[S,P_out], target_valid[S,P_out]
 
-reservoir IterableDataset -> List[(item, spec)]  (a chosen pack-group; ~B buffers' worth)
+reservoir IterableDataset -> pack-group (~B buffers' worth): specs chosen + assembled,
+                            then grouped into buffers (best-fit-decreasing, S11)
+                            -> buffers: list[list[AssembledSegment]]
 
-pack(...) -> Batch (all static at L; see §1 side-tensor table):
+pack(buffers, *, l_pack, p_out, num_buffers) -> Batch (all static at L; see §1 side-tensor table):
   side tensors            : sample_id, channel_idx, t_center, tier_id, role, content_state,
                             role_ft, raw_start, variate_uid, valid_aux       each [B, L]
   raw store               : norm_values [B, R], observed [B, R]
@@ -202,7 +232,7 @@ metrics                  : per-config test loss on deterministic first-100 shard
 - `assemble.py`: given `(item, spec, P_out)`, normalize per channel (D10, base scale σΔ[0]), build the **flat per-segment `norm_values`/`observed` store** + per-token `raw_start` (the gather store), emit per-token `role`/`content_state`/`role_ft` (fully-missing patch → `content_state=NA`; **KFF = observed CTX feature token at t>0**, D11), `stats_a`/`stats_sigma_delta`, and **dense `horizon_target[S,P_out]`/`target_valid`** (real only at query slots). Also sets `valid_aux` (raw-time origin-crossing/history-edge/observed check). Pure — the heart of the collator.
 
 ### `packing/`
-- `collator.py`: **stateless** `pack(...) -> Batch` (13 fields, §1). Best-fit placement of segments into `B` buffers of length `L`, channel-major, pad tail (`sample_id=-1`); concatenates per-segment `norm_values` into `[B,R]` and offsets each token's `raw_start`; scatters dense horizon GT into `[B,L,P_out]`. *Signature frozen* — both the trivial path and the reservoir path call it unchanged.
+- `collator.py`: **stateless** `pack(buffers: list[list[AssembledSegment]], *, l_pack, p_out, num_buffers=None) -> Batch` (16 fields, §1). Pure tensor materialization of a **caller-provided** grouping (no best-fit packing here — that is the reservoir's job, S11): lays each segment channel-major into its buffer, pads the tail (`sample_id=-1`); concatenates per-segment `norm_values` into `[B,R]` and offsets each token's `raw_start` (and `variate_uid` → buffer-unique); broadcasts per-token `stats_a`/`stats_sigma`; scatters dense horizon GT into `[B,L,P_out]`. *Signature frozen* — both the trivial path (S6/S10) and the reservoir path (S11) call it unchanged. See the post-S6 reconciliation block up top.
 - `reservoir.py`: `IterableDataset` wrapping a base loader: pulls items, runs `window_sampler`, keeps a reservoir of `K≈1000` specs (doubles as shuffle buffer), **best-fit-decreasing**, refills, yields pack-groups. *(Built in Stage 11, after the trivial path.)*
 - `scheduler.py`: D9.4 cost = `Σ S_i²/2`; window of 64–256 buffers sorted by cost → each global step formed from similar-cost buffers (giants travel together). Shapes unchanged.
 
@@ -243,7 +273,7 @@ The four mandatory pre-training gates are **S1, S2, S5, S9**.
 | **S3** | `synthetic.py`, `standin_loader.py`, `contract.py` | `test_synthetic`: items honor exact `(float32 [n,t], int, int)` contract, features-first, NaNs present, `n`/`t` vary; shared-factor channels show measurable cross-correlation; lag-probe planted. |
 | **S4** | `tokenize/` (spec, window_sampler, assemble) | Spec-predicted `S` equals assembled length exactly; origin/`p`/counts within bounds; 3-enum tagging correct (role CTX/QRY, content_state OBSERVED/MASK/NA, role_ft FEATURE/TARGET; KFF = observed CTX feature @ t>0); flat `norm_values`+`raw_start` gather in-bounds; dense `horizon_target`; capacity under `ENCODER_CAP`. |
 | **S5** | `masks.py` | **[GATE] `test_masks`**: enumerate small grid; assert every `(q,k)` matches the boolean formula (ctx→ctx causal+channel-blind; qry→ctx always; qry→qry both ways; ctx→qry never; pad self-only). Flex `BlockMask` == SDPA bool. |
-| **S6** | `packing/collator.py` (trivial no-reservoir collate_fn) | `test_collator_shapes`: packs DataLoader's list into `[B,L]` buffers; all side tensors + capacities present; tail pad `sample_id=-1`. |
+| **S6** | `packing/collator.py` (stateless `pack`; caller-provided grouping, no reservoir) | `test_collator_shapes`: materializes a pre-grouped `list[list[AssembledSegment]]` into `[B,L]` buffers; all 16 side tensors present; `raw_start`/`variate_uid` rebased buffer-global; tail pad `sample_id=-1`. |
 | **S7** | `model/` (embeddings, variate_id, encoders, attention, blocks, heads, tetris) | `test_model_smoke`: forward on one packed buffer → finite dense `[B,L,P_out]` horizon + `[B,L,P_k]×6` aux; both backends; encoders at static `ENCODER_CAP`. |
 | **S8** | `losses.py`, `metrics.py` | Loss finite & differentiable; NaN-GT and missing-patch positions contribute zero; **test loss** on a toy shard (MASE deferred, O4). **`test_aux_boundary`** (required): aux term zeroed exactly when the raw-time target region crosses the origin or runs off history; per-tier `aux_weights` applied. |
 | **S9** | (integration of S6–S8) | **[GATE] `test_pack_invariance`**: identical samples packed together vs in solo buffers → **identical per-sample loss and per-token outputs** (permutation + packing invariance). Keystone guard against the D8 buffer-index-leakage bug; also confirms cross-resolution aux overlap (OA) is layout-independent. |
