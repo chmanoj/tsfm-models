@@ -77,6 +77,13 @@ class PackingCfg:
     L_pack: int = 1024             # -> 2048 expansion (D12)
     buffers_per_step: int = 8      # B
     reservoir: bool = True         # trivial path flips this off (Stage 10)
+    # Streaming packer (S11/D9.3): reservoir size K (doubles as shuffle buffer);
+    # a buffer is emitted once its residual drops below tail_tolerance·L_pack
+    # (or nothing else fits). Scheduler window W (64–256 buffers) is cost-sorted
+    # (D9.4) and chunked into similar-cost B-buffer steps.
+    reservoir_k: int = 1000        # K ≈ 1000 (D9.3)
+    scheduler_window: int = 128    # W ∈ [64, 256] (D9.4)
+    tail_tolerance: float = 0.05   # emit when residual < tail_tolerance·L_pack
 
 
 @dataclass
@@ -136,6 +143,12 @@ class Config:
             raise ValueError("model.tier_alloc_per_channel entries must be positive (ratio prior)")
         if self.model.encoder_cap < 0:
             raise ValueError("model.encoder_cap must be >= 0 (0 resolves to packing.L_pack)")
+        if self.packing.reservoir_k < 1:
+            raise ValueError("packing.reservoir_k must be >= 1")
+        if self.packing.scheduler_window < 1:
+            raise ValueError("packing.scheduler_window must be >= 1")
+        if not (0.0 <= self.packing.tail_tolerance < 1.0):
+            raise ValueError("packing.tail_tolerance must be in [0, 1)")
         if len(self.loss.aux_weights) != V:
             raise ValueError(f"loss.aux_weights must have {V} entries; got {self.loss.aux_weights}")
         if self.norm.input_norm not in ("anchored_arcsinh", "zscore_arcsinh"):

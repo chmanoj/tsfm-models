@@ -109,6 +109,39 @@ vectors across layouts (training resamples freely). All four pre-training gates
   3.6.1 is already newest). 3.13 is the stable ML target; revisit when the
   3.14 toolchain catches up. `Batch.to(device)` added (additive) for device moves.
 
+**Streaming packer reconciliation (post-S11 — pinned, do not re-flag):**
+- **Reservoir yields assembled pack-groups; packing lives in an adapter, not the
+  loop.** `StreamingReservoir.__next__` yields one step as
+  `list[list[AssembledSegment]]` (B buffers). The frozen `pack` is called by the
+  thin `packed_batches(groups, *, l_pack, p_out, num_buffers)` generator **between**
+  the reservoir and `train/loop.py` — so the loop only iterates `Batch`es and the
+  reservoir stays collator-free / unit-testable. Decided over "reservoir returns a
+  `Batch`" to keep `pack` the single explicit seam. The collator/`Batch` are
+  untouched (S6 frozen).
+- **BFD reuses `pack`'s overflow contract as an invariant.** `_form_one_buffer`
+  greedily places the largest spec that fits the residual until residual <
+  `tail_tolerance·L` (or nothing fits); every spec satisfies `S ≤ L` by the
+  window-sampler budget, so giants take a buffer solo. `ΣS ≤ L` always holds ⇒
+  `pack`'s `ValueError` is a pure guard, never tripped on this path.
+- **Cost-bucketing is from specs, single-rank, before assembly.** `scheduler.py`:
+  `buffer_cost = Σ S_i²/2` (D9.4), `cost_bucketed_steps` sorts a window of
+  `scheduler_window` (W ∈ [64,256]) buffers and chunks into similar-cost B-buffer
+  steps (contiguous in cost order; short final step pad-filled by
+  `pack(num_buffers=B)`). Cost needs only `spec.S`, so scheduling runs **before**
+  `assemble`; only emitted buffers are assembled. **Single-rank/in-process now**;
+  the cross-rank cost all-gather (§9) stays S13 — the `cost_of` callable + the
+  deterministic sort are the seam a global schedule reuses.
+- **Resume is minimal-but-real (D13).** `state_dict`/`load_state_dict` capture the
+  RNG, the loader cursor (`items_pulled`), the pending reservoir specs, and any
+  formed-but-unyielded steps → exact resume at the **same** world size (the loader
+  is re-derived and the cursor skipped on load). Full re-shard at a *different*
+  world size is S13. Per-rank, shuffle seed rank-offset (`default_rng((seed,
+  rank))`); base loader already sharded disjointly by `build_loader` (O6).
+- **New `packing` config knobs:** `reservoir_k` (K≈1000), `scheduler_window`
+  (W∈[64,256]), `tail_tolerance` (residual floor, default 0.05). `cfg.packing.
+  reservoir` flips the trivial S10 path (`shakedown.py`) to the reservoir path
+  (`loop.run_training`); both call the same `pack`/`train_step`.
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).
