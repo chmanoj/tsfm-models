@@ -1,0 +1,86 @@
+"""Window sampler (walkthrough Stage 1) — origin/horizon sampling + integer budget
+fields. Pure, per item, shape-only (no data values), so segments are packable
+without tokenizing (D9). Emits a scalar ``SegmentSpec``.
+
+Budget (walkthrough): ``Q = n_targets·⌈p/P_out⌉``, ``K = n_kff·⌈p/P_out⌉``,
+``Q_total = Q+K``, ``n = ⌊(L − Q_total)/C⌋``. KFF is the horizon-side family with
+queries, charged to ``Q_total`` (not to the per-channel context budget ``n``).
+
+D11 note: only the KFF-reveal half of role augmentation is kept (each native
+feature is revealed known-future w.p. ``kff_reveal_prob``); the target→feature
+demotion half is deferred — it needs channel reordering, incompatible with the
+scalar, features-first ``SegmentSpec`` convention.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from math import ceil
+from typing import Tuple
+
+import numpy as np
+
+from .. import telescope as TS
+from ..constants import ChannelRole, PATCH
+from .spec import SegmentSpec
+
+
+@dataclass
+class SamplerParams:
+    l_pack: int
+    p_out: int
+    tier_prior: Tuple[int, ...] = (16, 16, 16, 16, 16, 8)  # D12 ratio prior
+    q_tok_max: int = 4              # max horizon tokens per horizon channel (design point: 4)
+    kff_reveal_prob: float = 0.0    # per native feature, reveal known-future (D11, partial)
+
+    def __post_init__(self) -> None:
+        assert self.p_out in PATCH, f"p_out {self.p_out} must be in the patch vocabulary {PATCH}"
+
+
+def sample_window(n_features: int, n_targets: int, t_raw: int, params: SamplerParams,
+                  rng) -> SegmentSpec:
+    """Sample one crop spec from a sample's shape (walkthrough Stage 1)."""
+    C = n_features + n_targets
+    assert C >= 1 and n_targets >= 1 and t_raw >= 2
+
+    # Per-channel roles (features-first): features [0,n_features), targets after.
+    # KFF-reveal among native features (D11, partial; demotion deferred).
+    channel_roles = [int(ChannelRole.FEATURE)] * n_features + [int(ChannelRole.TARGET)] * n_targets
+    for c in range(n_features):
+        if rng.random() < params.kff_reveal_prob:
+            channel_roles[c] = int(ChannelRole.KFF)
+    n_kff = sum(r == int(ChannelRole.KFF) for r in channel_roles)
+    n_horizon_channels = n_targets + n_kff
+
+    # Cap horizon so >=1 context token per channel fits and it fits the series.
+    max_q_by_budget = max(1, (params.l_pack - C) // max(1, n_horizon_channels))
+    max_q_by_series = max(1, (t_raw - 1) // params.p_out)
+    q_tok_max = max(1, min(params.q_tok_max, max_q_by_budget, max_q_by_series))
+
+    q_tok = int(rng.integers(1, q_tok_max + 1))
+    # variable-p within the chosen query-token band (D6): p in ((q_tok-1)·P, q_tok·P]
+    p_hi = min(q_tok * params.p_out, t_raw - 1)
+    p_lo = min((q_tok - 1) * params.p_out + 1, p_hi)
+    p = int(rng.integers(p_lo, p_hi + 1))
+    assert ceil(p / params.p_out) == q_tok
+
+    Q = n_targets * q_tok
+    K = n_kff * q_tok
+    Q_total = Q + K
+    n = max(1, (params.l_pack - Q_total) // C)
+
+    # Uniform random origin over valid positions: >=1 context step and p future steps.
+    origin = int(rng.integers(1, (t_raw - p) + 1))
+
+    # Coverage budget from n, clipped to available history before the origin.
+    prior = params.tier_prior
+    t_cov = TS.coverage(TS.default_counts(n, prior))
+    target_cov = min(t_cov, origin)
+    n_eff = max(1, TS.tokens_for_coverage(target_cov, max_tokens=n, prior=prior))
+    counts = TS.allocate(n_eff, target_cov, prior=prior)
+
+    return SegmentSpec(
+        C=C, n_features=n_features, n_targets=n_targets,
+        origin=origin, p=p, channel_roles=channel_roles,
+        Q=Q, K=K, Q_total=Q_total, n=n, counts=counts,
+    )

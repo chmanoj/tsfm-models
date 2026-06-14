@@ -1,0 +1,41 @@
+run: { name: shakedown, steps: 100, seed: 0 }
+backend:
+  device: auto            # cuda -> flex+compile ; mps/cpu -> sdpa+eager
+  compile: true           # honored on cuda; no-op on mps/cpu
+distributed:
+  enabled: false          # smokes run single-process; S13 flips this on
+  parallel: ddp           # ddp (default) | fsdp (scale-up switch)
+  process_group: gloo     # gloo on cpu/mac; nccl on cuda
+  shard_by: [node, rank]  # deterministic disjoint series shards
+model:
+  d_model: 32             # smokes much smaller than base (256); see §1
+  n_layers: 2             # base = 8
+  n_heads: 2
+  patch_vocab: [4, 8, 16, 64, 256, 512]
+  out_patch: 8
+  tier_alloc_per_channel: [16, 12, 8, 6, 4, 2]   # ratio prior (scaled by n at runtime), NOT literal counts
+  encoder_cap: 0                    # 0 -> L_pack; static per-tier encoder dispatch capacity (ENCODER_CAP)
+data:
+  loader: standin_pretrain
+  C_distribution: [1, 8]            # univariate..small multivariate
+  length_distribution: [64, 4096]
+  nan_cap: 0.3
+  synthetic_mix: { shared_factor: 0.5, univariate: 0.4, lag_probe: 0.1 }
+packing:
+  L_pack: 256
+  buffers_per_step: 2               # B
+  reservoir: false                  # Stage 10 trivial path; flip true at Stage 11
+norm:                               # D10 axes — all must run
+  input_norm: anchored_arcsinh
+  loss_target: locally_reanchored
+  loss_space: arcsinh
+loss:
+  aux_weights: [0.2, 0.2, 0.2, 0.2, 0.1, 0.1]   # per-tier (D6 + raw-time note); coarse tiers down-weighted
+eval:
+  enabled: true
+  loader: gifteval_test             # real GIFT-Eval download (O1)
+  shard_windows: 16                 # tiny stand-in for "first 100 per config"; record-only test loss
+checks:
+  assert_no_recompile: true         # fail if torch._dynamo recompiles
+  assert_pack_invariance: true      # run S9 invariant on a fixed mini-batch at startup
+  assert_aux_boundary: true         # run test_aux_boundary on the live batch

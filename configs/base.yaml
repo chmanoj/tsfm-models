@@ -1,0 +1,45 @@
+# Full-size defaults — the D12 design point (C=21, L_pack=1024).
+run: { name: base, steps: 100000, seed: 0 }
+backend:
+  device: auto
+  compile: true
+distributed:
+  enabled: false
+  parallel: ddp
+  process_group: nccl
+  shard_by: [node, rank]
+model:
+  d_model: 256            # O5
+  n_layers: 8             # O5
+  n_heads: 4
+  patch_vocab: [4, 8, 16, 64, 256, 512]
+  out_patch: 16           # D12 design point
+  tier_alloc_per_channel: [16, 16, 16, 16, 16, 8]   # ratio prior; normalizes to [8,8,8,8,8,4] at n=44
+  encoder_cap: 0          # 0 -> L_pack; static per-tier encoder dispatch capacity (ENCODER_CAP)
+data:
+  loader: standin_pretrain
+  C_distribution: [1, 21]
+  length_distribution: [64, 1000000]
+  nan_cap: 0.9            # D13 hygiene cap
+  synthetic_mix: { shared_factor: 0.5, univariate: 0.4, lag_probe: 0.1 }
+  dataset_weights: {}     # D13: id -> multiplier (0 removes + renormalizes)
+packing:
+  L_pack: 1024            # -> 2048 expansion (D12)
+  buffers_per_step: 8
+  reservoir: true
+norm:
+  input_norm: anchored_arcsinh
+  loss_target: locally_reanchored
+  loss_space: arcsinh
+  anchor_window: 32
+loss:
+  aux_weights: [0.2, 0.2, 0.2, 0.2, 0.1, 0.1]
+  loss_weighting: none    # D15 deferred
+eval:
+  enabled: true
+  loader: gifteval_test
+  shard_windows: 100
+checks:
+  assert_no_recompile: true
+  assert_pack_invariance: true
+  assert_aux_boundary: true

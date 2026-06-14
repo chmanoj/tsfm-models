@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TETRIS · End-to-end pipeline walkthrough</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Spline+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0d1117; --panel:#141b24; --panel2:#1a232e; --line:#27323f;
+  --ink:#e6edf3; --mid:#9da9b6; --dim:#646f7c;
+  --ctx:#3fb389; --qry:#e0a23c; --kff:#c77dff; --na:#5a6673; --pad:#2d3742;
+  --blue:#5aa9e6; --xchan:#4f86c6;
+  --mono:'JetBrains Mono',monospace; --sans:'Spline Sans',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--sans);background:var(--bg);color:var(--ink);font-size:15px;line-height:1.6;}
+.wrap{max-width:1000px;margin:0 auto;padding:40px 24px 120px;}
+header{border-bottom:1px solid var(--line);padding-bottom:24px;}
+.kicker{font-family:var(--mono);font-size:11.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--qry);margin-bottom:14px;}
+h1{font-size:31px;font-weight:600;letter-spacing:-.02em;}
+.lede{color:var(--mid);margin-top:12px;max-width:66ch;}
+.cfgbar{display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:24px 0 8px;font-family:var(--mono);font-size:12px;}
+.cfgbar div{padding:10px 14px;border-right:1px solid var(--line);flex:1 1 auto;min-width:110px;background:var(--panel);}
+.cfgbar div:last-child{border-right:none;}
+.cfgbar b{display:block;color:var(--dim);font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;margin-bottom:3px;font-weight:500;}
+.note{background:var(--panel2);border-left:3px solid var(--qry);border-radius:0 8px 8px 0;padding:13px 16px;margin:16px 0;font-size:13.5px;color:var(--mid);}
+.note b{color:var(--ink);font-weight:500;}
+.note.blue{border-left-color:var(--blue);}
+.stage{margin-top:34px;border:1px solid var(--line);border-radius:14px;background:var(--panel);overflow:hidden;}
+.stage-h{display:flex;align-items:center;gap:14px;padding:16px 22px;border-bottom:1px solid var(--line);background:var(--panel2);}
+.snum{font-family:var(--mono);font-weight:700;font-size:13px;color:var(--bg);background:var(--qry);width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex:0 0 auto;}
+.stage-h h2{font-size:18px;font-weight:600;flex:1;}
+.io{font-family:var(--mono);font-size:11px;color:var(--dim);text-align:right;line-height:1.5;}
+.io .in{color:#9fd0f5;} .io .out{color:#7fd6b0;}
+.tag{font-family:var(--mono);font-size:10px;color:var(--dim);border:1px solid var(--line);padding:3px 7px;border-radius:5px;white-space:nowrap;}
+.stage-b{padding:18px 22px 22px;}
+.stage-b p{color:var(--mid);margin:9px 0;}
+.stage-b p strong{color:var(--ink);font-weight:500;}
+.stage-b ul{margin:9px 0 9px 2px;list-style:none;}
+.stage-b li{margin:7px 0;padding-left:17px;position:relative;color:var(--mid);}
+.stage-b li::before{content:"";position:absolute;left:0;top:9px;width:6px;height:6px;border-radius:1px;background:var(--qry);}
+code{font-family:var(--mono);font-size:.86em;background:var(--panel2);border:1px solid var(--line);padding:1px 6px;border-radius:5px;color:var(--blue);white-space:nowrap;}
+.shape{font-family:var(--mono);font-size:12px;background:#0f2233;border:1px solid #1c3a52;color:#9fd0f5;padding:2px 8px;border-radius:6px;white-space:nowrap;display:inline-block;}
+.tt{width:100%;border-collapse:collapse;margin:14px 0 4px;font-size:12.5px;font-family:var(--mono);}
+.tt th{text-align:left;color:var(--dim);font-weight:500;font-size:10px;letter-spacing:.06em;text-transform:uppercase;padding:7px 11px;border-bottom:1px solid var(--line);}
+.tt td{padding:7px 11px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--mid);}
+.tt td:first-child{color:var(--ink);white-space:nowrap;}
+.tt tr:last-child td{border-bottom:none;}
+.tt .sz{color:#9fd0f5;white-space:nowrap;}
+.tt .g{color:#7fd6b0;}
+svg{display:block;width:100%;height:auto;margin:8px 0 4px;}
+.cap{font-size:11.5px;color:var(--dim);font-family:var(--mono);margin-top:4px;line-height:1.5;}
+.legend{display:flex;flex-wrap:wrap;gap:13px;margin:12px 0 4px;font-size:11px;font-family:var(--mono);color:var(--mid);}
+.legend span{display:inline-flex;align-items:center;gap:6px;}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block;}
+h3.sec{font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--mid);margin:30px 0 4px;display:flex;align-items:center;gap:12px;}
+h3.sec::after{content:"";flex:1;height:1px;background:var(--line);}
+.vardefs{font-family:var(--mono);font-size:12px;color:var(--mid);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin:14px 0;}
+.vardefs b{color:#9fd0f5;font-weight:500;}
+footer{margin-top:54px;padding-top:18px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--dim);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">TETRIS · data → model forward pass</div>
+  <h1>How one batch flows through the model</h1>
+  <p class="lede">A step-by-step trace with every tensor and its exact shape, worked through concrete example samples. Where a shape uses a variable, the variable is defined and its value for our examples is given. Follows decisions D1–D15.</p>
+</header>
+
+<div class="cfgbar">
+  <div><b>L_pack (L)</b>1024 slots</div>
+  <div><b>d_model (D)</b>256</div>
+  <div><b>batch (B)</b>4 buffers/step</div>
+  <div><b>patch vocab Pₖ</b>4·8·16·64·256·512</div>
+  <div><b>out patch</b>16</div>
+  <div><b>tiers</b>6</div>
+</div>
+
+<div class="vardefs">
+  <b>Nesting:</b> slot (one of L token positions) ⊂ <b>buffer</b> (one packed row of L slots, holds one-or-more whole samples + pad — the GPU's "sequence") ⊂ <b>batch</b> (B buffers per step).<br>
+  Batch tensor after embedding is <span class="shape">[B, L, D] = [4, 1024, 256]</span>. A buffer is <b>not</b> one sample.
+</div>
+
+<div class="vardefs">
+  <b>Types used in the signatures below.</b> Tensors written as <code>name: dtype[shape]</code>; structs are plain dataclasses.<br>
+  <b>LoaderItem</b> = <code>tuple[Tensor float32[C, t_i], int n_features, int n_targets]</code><br>
+  <b>SegmentSpec</b> = dataclass{ <code>C: int, n_features: int, n_targets: int, origin: int, p: int, channel_roles: ChannelRole[C], Q: int, K: int, Q_total: int, n: int, counts: int[6]</code> } — scalar ints (origin = index into the raw series where context ends / horizon begins), plus the per-channel <code>channel_roles</code> list (each ∈ {FEATURE, TARGET, KFF}; KFF = a feature whose horizon is revealed) and the 6-int per-tier counts. This is CPU pack-time data — the variable-length list never reaches the GPU, so it does not affect the static compiled shapes.<br>
+  <b>TokenMeta</b> = dataclass{ <code>tier_id, channel, raw_start, variate_uid: int; role: Role{CTX,QRY}; content_state: ContentState{OBSERVED,MASK,NA}; role_ft: RoleFT{FEATURE,TARGET}; t_center: float; valid_aux: bool</code> } — one per token. The three enums are independent (D6/D7/D11): <code>role</code> drives the mask, <code>content_state</code> selects the content slot, <code>role_ft</code> is the added role embedding. A known-future feature (KFF) is <b>not</b> a separate role — it is an observed CTX feature token at <code>t_center &gt; 0</code> (distinguished by time, D11).<br>
+  <b>Stats</b> = dataclass{ <code>a: float; sigma_delta: float[6]</code> } — <b>one anchor and one per-tier scale per (sample, channel), constant across all timesteps</b> (not rolling/per-step; this is what makes inversion possible with two numbers).<br>
+  <b>Batch</b> = the collated NamedTuple of GPU tensors (full field list in Stage 4).
+</div>
+
+<h3 class="sec">Example samples (raw loader output)</h3>
+<p>Each base-loader item is <code>(data_tensor, num_features, num_targets)</code>, <span class="shape">data_tensor: [n_i, t_i] float32</span>, features-first, may contain NaN. We trace these through every stage:</p>
+<table class="tt">
+  <tr><th>sample</th><th>C (n_i)</th><th>t_i raw steps</th><th>feat / tgt</th><th>horizon p</th><th>note</th></tr>
+  <tr><td>A</td><td class="sz">21</td><td class="sz">5,000</td><td>0 / 21</td><td class="sz">64</td><td>design point; fills a buffer alone</td></tr>
+  <tr><td>B</td><td class="sz">1</td><td class="sz">200,000</td><td>0 / 1</td><td class="sz">128</td><td>deep history; fills a buffer alone</td></tr>
+  <tr><td>C</td><td class="sz">5</td><td class="sz">800</td><td>3 / 2</td><td class="sz">48</td><td>2 features known-future (KFF)</td></tr>
+  <tr><td>E</td><td class="sz">2</td><td class="sz">150</td><td>0 / 2</td><td class="sz">16</td><td>small — packs with others</td></tr>
+  <tr><td>F</td><td class="sz">8</td><td class="sz">300</td><td>0 / 8</td><td class="sz">32</td><td>small — packs with others</td></tr>
+</table>
+
+<!-- WHOLE PATH OVERVIEW -->
+<h3 class="sec">The whole path, with shapes</h3>
+<svg viewBox="0 0 1000 230" role="img" aria-label="Pipeline overview with input and output shapes for each block, split into CPU dataloader stages and GPU compiled stages.">
+  <text x="6" y="16" fill="#646f7c" font-family="JetBrains Mono" font-size="11">CPU · dataloader workers · per-item then per-buffer</text>
+  <line x1="6" y1="24" x2="640" y2="24" stroke="#27323f"/>
+  <g font-family="JetBrains Mono" font-size="10">
+    <!-- row 1 CPU -->
+    <g transform="translate(6,34)">
+      <rect width="118" height="46" rx="7" fill="#1a232e" stroke="#27323f"/><text x="59" y="20" fill="#9da9b6" text-anchor="middle" font-size="11">1 window</text><text x="59" y="36" fill="#646f7c" text-anchor="middle">item→spec</text>
+      <rect x="130" width="118" height="46" rx="7" fill="#1a232e" stroke="#27323f"/><text x="189" y="20" fill="#9da9b6" text-anchor="middle" font-size="11">2 telescope</text><text x="189" y="36" fill="#646f7c" text-anchor="middle">spec→counts</text>
+      <rect x="260" width="118" height="46" rx="7" fill="#1a232e" stroke="#27323f"/><text x="319" y="20" fill="#9da9b6" text-anchor="middle" font-size="11">3 normalize</text><text x="319" y="36" fill="#646f7c" text-anchor="middle">raw→z</text>
+      <rect x="390" width="240" height="46" rx="7" fill="#11271f" stroke="#3fb389"/><text x="510" y="20" fill="#3fb389" text-anchor="middle" font-size="11">4 pack (collator)</text><text x="510" y="36" fill="#7fd6b0" text-anchor="middle">→ [B,L] buffer + side tensors</text>
+    </g>
+  </g>
+  <text x="6" y="112" fill="#646f7c" font-family="JetBrains Mono" font-size="11">GPU · compiled · per-batch [B=4, L=1024]</text>
+  <line x1="6" y1="120" x2="994" y2="120" stroke="#27323f"/>
+  <g font-family="JetBrains Mono" font-size="10">
+    <g transform="translate(6,130)">
+      <rect width="150" height="46" rx="7" fill="#0f2233" stroke="#5aa9e6"/><text x="75" y="20" fill="#5aa9e6" text-anchor="middle" font-size="11">5 mask</text><text x="75" y="36" fill="#646f7c" text-anchor="middle">BlockMask [B,L,L]</text>
+      <rect x="162" width="190" height="46" rx="7" fill="#1a232e" stroke="#27323f"/><text x="257" y="20" fill="#9da9b6" text-anchor="middle" font-size="11">7 tier encoders → content</text><text x="257" y="36" fill="#7fd6b0" text-anchor="middle">[B,L,D]</text>
+      <rect x="358" width="190" height="46" rx="7" fill="#1a232e" stroke="#27323f"/><text x="453" y="20" fill="#9da9b6" text-anchor="middle" font-size="11">6 embed (sum 5 parts)</text><text x="453" y="36" fill="#7fd6b0" text-anchor="middle">[B,L,D]</text>
+      <rect x="554" width="200" height="46" rx="7" fill="#1a232e" stroke="#27323f"/><text x="654" y="20" fill="#9da9b6" text-anchor="middle" font-size="11">8 transformer ×N</text><text x="654" y="36" fill="#7fd6b0" text-anchor="middle">[B,L,D]→[B,L,D]</text>
+      <rect x="760" width="228" height="46" rx="7" fill="#2a2110" stroke="#e0a23c"/><text x="874" y="20" fill="#e0a23c" text-anchor="middle" font-size="11">9 heads + loss</text><text x="874" y="36" fill="#7fd6b0" text-anchor="middle">horizon + aux MAE</text>
+    </g>
+  </g>
+  <text x="6" y="206" fill="#646f7c" font-family="JetBrains Mono" font-size="10">Stage 7 feeds the "content" slot of the Stage 6 sum; they're drawn in execution order (encoders first, then the full embedding sum).</text>
+</svg>
+
+<!-- ===================== STAGE 1 ===================== -->
+<div class="stage">
+  <div class="stage-h"><span class="snum">1</span><h2>Window sampling</h2><div class="io"><span class="in">in:</span> item: LoaderItem<br><span class="out">out:</span> spec: SegmentSpec</div></div>
+  <div class="stage-b">
+    <p><code>sample_window(item: LoaderItem, rng) → SegmentSpec</code>. Pure, per item. Draws horizon <code>p</code> and a forecast <code>origin</code>, computes the integer budget fields. <strong>Only time is cut, never channels.</strong> No tokenization, no tensors out — just the ~13-int struct.</p>
+    <div class="vardefs">
+      <b>Q</b> = n_targets·⌈p/16⌉ query tokens &nbsp;·&nbsp; <b>K</b> = n_kff_feat·⌈p/16⌉ KFF tokens &nbsp;·&nbsp; <b>Q_total</b> = Q+K<br>
+      <b>n</b> = ⌊(L − Q_total)/C⌋ &nbsp; per-channel token budget
+    </div>
+    <table class="tt">
+      <tr><th>sample</th><th>C</th><th>p</th><th>⌈p/16⌉</th><th>Q</th><th>K (KFF)</th><th>Q_total</th><th>n=⌊(1024−Q_total)/C⌋</th></tr>
+      <tr><td>A</td><td>21</td><td>64</td><td>4</td><td class="sz">84</td><td class="sz">0</td><td class="sz">84</td><td class="sz">44</td></tr>
+      <tr><td>B</td><td>1</td><td>128</td><td>8</td><td class="sz">8</td><td class="sz">0</td><td class="sz">8</td><td class="sz">1016</td></tr>
+      <tr><td>C</td><td>5</td><td>48</td><td>3</td><td class="sz">6</td><td class="sz">6</td><td class="sz">12</td><td class="sz">202</td></tr>
+      <tr><td>E</td><td>2</td><td>16</td><td>1</td><td class="sz">2</td><td class="sz">0</td><td class="sz">2</td><td class="sz">511</td></tr>
+      <tr><td>F</td><td>8</td><td>32</td><td>2</td><td class="sz">16</td><td class="sz">0</td><td class="sz">16</td><td class="sz">126</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ===================== STAGE 2 ===================== -->
+<div class="stage">
+  <div class="stage-h"><span class="snum">2</span><h2>Telescope allocation</h2><div class="io"><span class="in">in:</span> spec: SegmentSpec, t_i: int<br><span class="out">out:</span> spec (counts filled), meta: list[TokenMeta]</div></div>
+  <div class="stage-b">
+    <p><code>allocate(spec: SegmentSpec, t_i: int) → tuple[SegmentSpec, list[TokenMeta]]</code>. Fills <code>spec.counts[6]</code> and emits one <code>TokenMeta</code> per token of this segment (length = ctx_tokens + Q_total). Splits <code>n</code> across 6 tiers by the ratio prior (front-loaded ≈ <code>[8,8,8,8,8,4]</code>), then <strong>trims coarse→fine until coverage ≤ t_i</strong>.</p>
+    <table class="tt">
+      <tr><th>sample</th><th>counts per tier [×4,×8,×16,×64,×256,×512]</th><th>Σ/ch</th><th>coverage</th><th>ctx = Σ·C</th><th>segment S = ctx+Q_total</th></tr>
+      <tr><td>A</td><td class="sz">[8, 8, 8, 8, 8, 4]</td><td>44</td><td>4,832</td><td class="g">924</td><td class="g">1,008</td></tr>
+      <tr><td>B</td><td class="sz">[184,184,184,184,184,92]</td><td>1,012</td><td>111,136</td><td class="g">1,012</td><td class="g">1,020</td></tr>
+      <tr><td>C</td><td class="sz">[36, 36, 23, 0, 0, 0]</td><td>95</td><td>800</td><td class="g">475</td><td class="g">481</td></tr>
+      <tr><td>E</td><td class="sz">[37, 0, 0, 0, 0, 0]</td><td>37</td><td>148</td><td class="g">74</td><td class="g">76</td></tr>
+      <tr><td>F</td><td class="sz">[22, 22, 2, 0, 0, 0]</td><td>46</td><td>296</td><td class="g">368</td><td class="g">384</td></tr>
+    </table>
+    <p class="cap">A &amp; B fill ~a whole buffer each. C/E/F are short → trimmed to a few fine tiers → small segments that pack together (Stage 4). The per-tier counts are dynamic data; they do not set the compiled shape (that's always L).</p>
+  </div>
+</div>
+
+<!-- ===================== STAGE 3 ===================== -->
+<div class="stage">
+  <div class="stage-h"><span class="snum">3</span><h2>Normalization (anchored arcsinh)</h2><div class="io"><span class="in">in:</span> raw: float32[C, ctx_len]<br><span class="out">out:</span> norm: float32[R], obs: bool[R], stats: Stats</div></div>
+  <div class="stage-b">
+    <p><code>normalize(raw: float32[C, ctx_len]) → tuple[float32[R], bool[R], Stats]</code>, per channel, context-only, exactly invertible. <code>z = arcsinh((x−a)/σΔ)</code>, <code>a = median(last 32)</code>, <code>σΔ = 1.4826·median|Δx|</code> (fallback chain &amp; per-tier σΔ).</p>
+    <table class="tt">
+      <tr><th>output</th><th>shape</th><th>notes</th></tr>
+      <tr><td>norm_values</td><td class="sz">[R] float32</td><td>R = total normalized raw steps the buffer's tokens reference (per-buffer, large for deep crops). Indexed by each token's <code>raw_start</code>.</td></tr>
+      <tr><td>observed_mask</td><td class="sz">[R] bool</td><td>NaN→0 + indicator (D7).</td></tr>
+      <tr><td>a, σΔ</td><td class="sz">[n_samples, C], [n_samples, C, 6]</td><td><b>one anchor a per (sample, channel)</b> (the level at the origin); <b>one σΔ per (sample, channel, tier)</b>. Constant across all timesteps — the <em>whole</em> context+horizon of a channel is normalized by the same a, σΔ (not a rolling per-step normalization). For inversion at Stage 9 &amp; as scale receipts to the variate embedding (D4).</td></tr>
+    </table>
+    <p class="cap">R is the only quantity not bounded by L — it's the raw history length, e.g. Sample B references ~111k steps. The L-bounded tokens carry pointers (raw_start) into this store, not the values themselves. <b>Note the shape contrast:</b> norm_values is per-timestep <code>[R]</code> (the actual normalized series), but a/σΔ are just a handful of scalars per channel — because anchored-arcsinh applies <em>one</em> (a, σΔ) uniformly to the whole channel, it is not a per-timestep transform.</p>
+  </div>
+</div>
+
+<!-- ===================== STAGE 4 ===================== -->
+<div class="stage">
+  <div class="stage-h"><span class="snum">4</span><h2>Pack — segments into buffers</h2><div class="io"><span class="in">in:</span> list[(spec, meta, norm, obs, stats)]<br><span class="out">out:</span> batch: Batch</div></div>
+  <div class="stage-b">
+    <p><code>collate(items: list[tuple[SegmentSpec, list[TokenMeta], float32[R], bool[R], Stats]]) → Batch</code>. Stateless. Lays each sample <strong>channel-major</strong> into a buffer, best-fit-packing small samples together, tail padded with <code>s=−1</code>. The batch is <strong>B=4 buffers</strong>:</p>
+    <svg viewBox="0 0 1000 250" role="img" aria-label="Four packed buffers. Buffer 0 holds Sample A then pad; buffer 1 holds Sample B then pad; buffer 2 packs samples C, F, E together then pad; buffer 3 holds another A.">
+      <defs><linearGradient id="pad" x1="0" x2="1"><stop offset="0" stop-color="#2d3742"/><stop offset="1" stop-color="#1a232e"/></linearGradient></defs>
+      <g font-family="JetBrains Mono" font-size="10">
+        <!-- scale: 1024 slots -> 960px, x0=30 -->
+        <!-- buffer 0 -->
+        <text x="6" y="34" fill="#9da9b6">buf 0</text>
+        <g transform="translate(30,22)">
+          <rect x="0" y="0" width="866" height="26" rx="3" fill="#11271f" stroke="#3fb389"/><text x="433" y="17" fill="#3fb389" text-anchor="middle">Sample A · ctx 924 (21ch×44)</text>
+          <rect x="866" y="0" width="79" height="26" rx="3" fill="#2a2110" stroke="#e0a23c"/><text x="905" y="17" fill="#e0a23c" text-anchor="middle">Q 84</text>
+          <rect x="945" y="0" width="15" height="26" rx="3" fill="url(#pad)" stroke="#2d3742"/>
+        </g>
+        <!-- buffer 1 -->
+        <text x="6" y="74" fill="#9da9b6">buf 1</text>
+        <g transform="translate(30,62)">
+          <rect x="0" y="0" width="949" height="26" rx="3" fill="#11271f" stroke="#3fb389"/><text x="474" y="17" fill="#3fb389" text-anchor="middle">Sample B · ctx 1012 (1ch×1012, deep telescope)</text>
+          <rect x="949" y="0" width="7" height="26" rx="3" fill="#2a2110" stroke="#e0a23c"/>
+          <rect x="956" y="0" width="4" height="26" fill="url(#pad)"/>
+        </g>
+        <!-- buffer 2 packed -->
+        <text x="6" y="114" fill="#9da9b6">buf 2</text>
+        <g transform="translate(30,102)">
+          <rect x="0" y="0" width="445" height="26" rx="3" fill="#11271f" stroke="#3fb389"/><text x="222" y="17" fill="#3fb389" text-anchor="middle">C (481)</text>
+          <rect x="445" y="0" width="360" height="26" rx="3" fill="#0f2a24" stroke="#3fb389"/><text x="625" y="17" fill="#5cbf99" text-anchor="middle">F (384)</text>
+          <rect x="805" y="0" width="71" height="26" rx="3" fill="#0c211c" stroke="#3fb389"/><text x="840" y="17" fill="#5cbf99" text-anchor="middle">E 76</text>
+          <rect x="876" y="0" width="84" height="26" rx="3" fill="url(#pad)" stroke="#2d3742"/><text x="918" y="17" fill="#646f7c" text-anchor="middle">pad 83</text>
+        </g>
+        <!-- buffer 3 -->
+        <text x="6" y="154" fill="#9da9b6">buf 3</text>
+        <g transform="translate(30,142)">
+          <rect x="0" y="0" width="866" height="26" rx="3" fill="#11271f" stroke="#3fb389"/><text x="433" y="17" fill="#3fb389" text-anchor="middle">Sample A′ · ctx 924</text>
+          <rect x="866" y="0" width="79" height="26" rx="3" fill="#2a2110" stroke="#e0a23c"/><text x="905" y="17" fill="#e0a23c" text-anchor="middle">Q 84</text>
+          <rect x="945" y="0" width="15" height="26" rx="3" fill="url(#pad)"/>
+        </g>
+        <!-- axis -->
+        <g transform="translate(30,178)" fill="#646f7c">
+          <text x="0" y="12">0</text><text x="450" y="12" text-anchor="middle">512</text><text x="960" y="12" text-anchor="end">1024 slots</text>
+        </g>
+      </g>
+      <text x="6" y="218" fill="#646f7c" font-family="JetBrains Mono" font-size="10">buf 2 shows real multi-sample packing: C(481)+F(384)+E(76)=941, then 83 pad. Within C, F, E each block is itself channel-major internally.</text>
+    </svg>
+
+    <h3 class="sec" style="margin-top:20px">The <code>Batch</code> NamedTuple — full field list</h3>
+    <table class="tt">
+      <tr><th>field</th><th>type / shape</th><th>meaning</th></tr>
+      <tr><td>sample_id</td><td class="sz">int32[B,L]</td><td>segment id within the buffer (−1 = pad). Drives block-diagonal attention &amp; loss validity.</td></tr>
+      <tr><td>channel_idx</td><td class="sz">int32[B,L]</td><td>channel within its sample.</td></tr>
+      <tr><td>t_center</td><td class="sz">float32[B,L]</td><td>continuous time vs forecast origin — the only positional signal (D8).</td></tr>
+      <tr><td>tier_id</td><td class="sz">int8[B,L]</td><td>0–5; selects per-tier encoder &amp; span embedding.</td></tr>
+      <tr><td>role</td><td class="sz">int8[B,L]</td><td>CTX · QRY (D6/D9) — drives the attention mask. (Pad = sample_id −1.)</td></tr>
+      <tr><td>content_state</td><td class="sz">int8[B,L]</td><td>OBSERVED · MASK · NA (D7) — selects the content slot (encoder output | [MASK] | [NA]).</td></tr>
+      <tr><td>role_ft</td><td class="sz">int8[B,L]</td><td>FEATURE · TARGET (D11) — the added role embedding. KFF tokens are FEATURE.</td></tr>
+      <tr><td>raw_start</td><td class="sz">int32[B,L]</td><td>offset into norm_values[B,R] for this token's patch window (−1 unless OBSERVED).</td></tr>
+      <tr><td>variate_uid</td><td class="sz">int32[B,L]</td><td>per-(sample,channel) seed → random orthonormal ID (D4).</td></tr>
+      <tr><td>valid_aux</td><td class="sz">bool[B,L]</td><td>is the next-patch aux target well-defined here? (boundary/origin/NaN).</td></tr>
+      <tr><td>norm_values</td><td class="sz">float32[B,R]</td><td>per-buffer normalized raw store; R = max raw steps referenced (ragged→padded).</td></tr>
+      <tr><td>observed</td><td class="sz">bool[B,R]</td><td>observed-indicator for norm_values (D7).</td></tr>
+      <tr><td>stats_a, stats_sigma</td><td class="sz">float32[B,L]</td><td>per-token anchor &amp; scale (broadcast from Stats) for Stage-9 inversion.</td></tr>
+      <tr><td>horizon_target</td><td class="sz">float32[B,L,16]</td><td>ground-truth horizon patch aligned to each slot; only query slots carry real data (rest ignored via mask). Dense shape ⇒ static, no per-batch Qmax.</td></tr>
+      <tr><td>target_valid</td><td class="sz">bool[B,L,16]</td><td>true only at query slots with non-NaN ground truth; everything else false.</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ===================== STAGE 5 ===================== -->
+<div class="stage">
+  <div class="stage-h"><span class="snum">5</span><h2>FlexAttention mask — one L×L per buffer</h2><div class="io"><span class="in">in:</span> batch: Batch<br><span class="out">out:</span> block_mask: BlockMask[B,L,L]</div></div>
+  <div class="stage-b">
+    <p>Attention <strong>never crosses buffers</strong> — each of the B buffers gets its own independent <span class="shape">L×L = 1024×1024</span> mask; the batched BlockMask is <span class="shape">[B, L, L]</span>. Within a buffer, a query slot q attends key slot k iff they're the same sample AND the causal/role rule holds:</p>
+    <p style="text-align:center;font-family:var(--mono);font-size:12px;color:#9fd0f5;background:#0f2233;border:1px solid #1c3a52;border-radius:8px;padding:11px;">
+      sample_id[q]==sample_id[k] AND ( (role[k]==CTX AND (role[q]==QRY OR t[k]≤t[q])) OR (role[k]==QRY AND role[q]==QRY) )
+    </p>
+    <p class="cap" style="margin-top:6px">D9 truth table (role ∈ {CTX, QRY}). A KFF token is <b>role=CTX</b>, so it falls out for free: queries read it (qry→ctx), context can't see it (causality, t_k&gt;t_q), it attends its own causal past, and it never attends queries (D11). No KFF special-casing in the mask.</p>
+    <div class="legend">
+      <span><span class="sw" style="background:#3fb389"></span>own-channel causal</span>
+      <span><span class="sw" style="background:#4f86c6"></span>cross-channel causal (same sample, t_k≤t_q)</span>
+      <span><span class="sw" style="background:#e0a23c"></span>query→context</span>
+      <span><span class="sw" style="background:#1a232e;border:1px solid #2d3742"></span>masked / skipped</span>
+    </div>
+    <p class="cap" style="margin-top:10px">Two buffers shown — they are <b>separate matrices</b>, not one shared space. Within buf 2, the three packed samples (C, F, E) form their own block-diagonal sub-blocks; cross-sample pairs inside the same buffer are masked too.</p>
+    <svg viewBox="0 0 1000 380" role="img" aria-label="Two independent L by L attention matrices. Buffer 0 is a single sample: one dense causal triangle with cross-channel causal fill below the diagonal and a query strip. Buffer 2 has three samples as three smaller causal triangles on the diagonal, off-sample regions masked.">
+      <g font-family="JetBrains Mono" font-size="10.5">
+        <!-- buffer 0 matrix: single sample -->
+        <text x="0" y="16" fill="#9da9b6">buffer 0 · single sample A · [1024×1024]</text>
+        <g transform="translate(40,28)">
+          <rect x="0" y="0" width="300" height="300" fill="#0d1117" stroke="#27323f"/>
+          <!-- causal lower triangle: cross-channel causal fill -->
+          <path d="M0 0 L0 300 L300 300 Z" fill="#16314a" opacity="0.55"/>
+          <!-- own-channel diagonal band (thicker near diagonal) -->
+          <path d="M0 0 L300 300 L284 300 L0 16 Z" fill="#3fb389" opacity="0.9"/>
+          <!-- query strip: last ~84 rows attend all context (full width lower) -->
+          <rect x="0" y="276" width="300" height="24" fill="#2a2110"/>
+          <path d="M0 276 L276 276 L276 300 L0 300 Z" fill="#e0a23c" opacity="0.35"/>
+          <text x="150" y="150" fill="#cfe8df" text-anchor="middle" font-size="10">dense causal</text>
+          <text x="150" y="166" fill="#7fb5d6" text-anchor="middle" font-size="9">own + cross-channel</text>
+          <text x="150" y="291" fill="#e0a23c" text-anchor="middle" font-size="9">query rows → all ctx</text>
+          <!-- axes -->
+          <text x="150" y="316" fill="#646f7c" text-anchor="middle">key slots →</text>
+          <text x="-150" y="-6" fill="#646f7c" text-anchor="middle" transform="rotate(-90)">query slots →</text>
+        </g>
+        <!-- buffer 2 matrix: three packed samples -->
+        <text x="520" y="16" fill="#9da9b6">buffer 2 · packed C+F+E · [1024×1024]</text>
+        <g transform="translate(560,28)">
+          <rect x="0" y="0" width="300" height="300" fill="#0d1117" stroke="#27323f"/>
+          <!-- C block: 0..141 (481/1024*300=141) -->
+          <path d="M0 0 L0 141 L141 141 Z" fill="#16314a" opacity="0.55"/>
+          <path d="M0 0 L141 141 L133 141 L0 8 Z" fill="#3fb389" opacity="0.9"/>
+          <text x="60" y="80" fill="#cfe8df" font-size="9" text-anchor="middle">C</text>
+          <!-- F block: 141..253 (384/1024*300=112) -->
+          <path d="M141 141 L141 253 L253 253 Z" fill="#16314a" opacity="0.55"/>
+          <path d="M141 141 L253 253 L245 253 L141 149 Z" fill="#3fb389" opacity="0.9"/>
+          <text x="197" y="216" fill="#cfe8df" font-size="9" text-anchor="middle">F</text>
+          <!-- E block: 253..275 (76/1024*300=22) -->
+          <path d="M253 253 L253 275 L275 275 Z" fill="#16314a" opacity="0.55"/>
+          <path d="M253 253 L275 275 L253 275 Z" fill="#3fb389" opacity="0.9"/>
+          <text x="266" y="271" fill="#cfe8df" font-size="8" text-anchor="middle">E</text>
+          <!-- pad region -->
+          <rect x="275" y="275" width="25" height="25" fill="#141b24"/>
+          <!-- masked off-sample labels -->
+          <text x="210" y="70" fill="#3a4654" font-size="9" text-anchor="middle">masked</text>
+          <text x="70" y="210" fill="#3a4654" font-size="9" text-anchor="middle">masked</text>
+          <text x="287" y="291" fill="#3a4654" font-size="8" text-anchor="middle">pad</text>
+          <text x="150" y="316" fill="#646f7c" text-anchor="middle">key slots →</text>
+        </g>
+      </g>
+      <text x="0" y="372" fill="#646f7c" font-family="JetBrains Mono" font-size="10">Each diagonal triangle = one sample's dense causal attention (green = near-diagonal own-channel emphasis; blue = the rest of the causal lower-triangle, all-channel). Off-sample blocks cost 0 FLOPs.</text>
+    </svg>
+    <div class="note blue"><b>Depth-invariant:</b> one BlockMask per batch, reused by every transformer layer. Built once on GPU. FlexAttention from the start so the A3 score-bias ladder and phase-2 NSA plug into <code>score_mod</code> with no kernel change.</p></div>
+  </div>
+</div>
+
+<!-- ===================== STAGE 7 ===================== -->
+<div class="stage">
+  <div class="stage-h"><span class="snum">7</span><h2>Per-tier encoder dispatch → content</h2><div class="io"><span class="in">in:</span> norm_values: f32[B,R], tier_id/raw_start: [B,L]<br><span class="out">out:</span> content: float32[B,L,D]</div></div>
+  <div class="stage-b">
+    <p>Goal: fill the <strong>content</strong> vector <span class="shape">[B, L, D] = [4,1024,256]</span> — one D-dim vector per token. Six encoders (one per patch width) can't be a single op, so route by index. <strong>To stay compile-static, each encoder runs at a fixed capacity <code>ENCODER_CAP</code> (config, default = L = 1024)</strong>, not the dynamic per-batch count — unused rows are sentinel-padded and masked after. Walk through it with concrete shapes:</p>
+    <div class="vardefs">
+      The <b>2</b> in <code>[CAP, Pₖ, 2]</code>: each timestep fed to an encoder carries two numbers — <b>channel 0 = normalized value</b>, <b>channel 1 = observed-indicator</b> (1 if real, 0 if it was NaN/missing and filled, per D7). This lets the encoder tell a genuine 0 from a filled-missing 0.
+    </div>
+    <table class="tt">
+      <tr><th>step</th><th>operation</th><th>shape</th></tr>
+      <tr><td>0 · flatten</td><td>treat the batch as B·L = 4096 token slots</td><td class="sz">[4096] of (tier_id, raw_start, content_state)</td></tr>
+      <tr><td>1 · route</td><td>for tier k, a fixed-length index list of slots with <code>content_state==OBSERVED</code> &amp; <code>tier_id==k</code> (context + KFF; real count Mₖ ≤ CAP; padded with sentinel to CAP)</td><td class="sz">idxₖ : int[CAP]  (CAP=1024)</td></tr>
+      <tr><td>2 · gather windows</td><td>pull each routed token's Pₖ-wide (value, observed) window from norm_values</td><td class="sz">winₖ : [CAP, Pₖ, 2]</td></tr>
+      <tr><td>3 · encode</td><td>encoderₖ : (Pₖ·2 → D) maps each window to one D-vector</td><td class="g">encₖ : [CAP, 256]</td></tr>
+      <tr><td>4 · scatter</td><td>write the Mₖ real rows back to their slots; sentinel rows discarded</td><td class="g">content_flat : [4096, 256]</td></tr>
+      <tr><td>5 · reshape</td><td>→ batch form</td><td class="g">content : [4, 1024, 256]</td></tr>
+    </table>
+    <div class="note"><b>Why CAP = L and not a tuned per-tier cap.</b> Each encoderₖ runs <code>[CAP, Pₖ, 2]→[CAP,256]</code> at fixed CAP, so the graph compiles once with no per-tier numbers to invent and no risk of dropping tokens. Cost of padding every tier to 1024 vs. routing the real counts: encoder FLOPs rise from ~0.9 to ~6.8 GFLOP/batch — but that is <b>6.6% vs 0.9% of the ~103 GFLOP transformer backbone</b>, i.e. ~6% extra total compute, and ~7 MB/buffer of gather transient. Accepted for simplicity. <code>ENCODER_CAP</code> is a config value (default L) so it can be lowered with an assert if L=2048 or large batch makes the tier-5 transient pinch. Note: pad the <em>token-count</em> dimension only — keep each encoder's native Pₖ width (tier-0 stays <code>[CAP,4,2]</code>, never <code>[CAP,512,2]</code>).</p></div>
+    <p>Worked example — <strong>tier-0 (×4) real token count M₀ across the batch</strong> (the encoder still runs at CAP=1024; M₀ is just how many of those rows are real):</p>
+    <table class="tt">
+      <tr><th>buffer</th><th>tier-0 tokens</th><th>how</th></tr>
+      <tr><td>buf 0 (A)</td><td class="sz">8×21 = 168</td><td>A has 8 tier-0 tokens/channel × 21 ch</td></tr>
+      <tr><td>buf 1 (B)</td><td class="sz">184×1 = 184</td><td>B has 184 tier-0/channel × 1 ch</td></tr>
+      <tr><td>buf 2 (C,F,E)</td><td class="sz">180+176+74 = 430</td><td>C 36×5, F 22×8, E 37×2</td></tr>
+      <tr><td>buf 3 (A′)</td><td class="sz">168</td><td>same as A</td></tr>
+      <tr><td><b>M₀ total</b></td><td class="sz"><b>950</b></td><td>950 real rows of the [1024,4,2] tier-0 gather; the other 74 rows are sentinel padding (masked out).</td></tr>
+    </table>
+    <svg viewBox="0 0 1000 200" role="img" aria-label="Dispatch flow: flat 4096 token slots routed by tier into six encoders, each gathering a fixed CAP-by-P_k window and producing CAP by 256 outputs, all scattered back into content 4 by 1024 by 256.">
+      <g font-family="JetBrains Mono" font-size="10">
+        <rect x="20" y="14" width="960" height="24" rx="4" fill="#0f2233" stroke="#1c3a52"/><text x="500" y="30" fill="#9fd0f5" text-anchor="middle">flat token slots [B·L = 4096]  +  norm_values [R]</text>
+        <g>
+          <g transform="translate(20,66)"><rect width="150" height="56" rx="6" fill="#11271f" stroke="#3fb389"/><text x="75" y="20" fill="#3fb389" text-anchor="middle" font-size="11">enc₀ ×4</text><text x="75" y="35" fill="#9da9b6" text-anchor="middle">win[CAP,4,2]</text><text x="75" y="48" fill="#7fd6b0" text-anchor="middle">→[CAP,256]</text></g>
+          <g transform="translate(180,66)"><rect width="150" height="56" rx="6" fill="#11271f" stroke="#3fb389"/><text x="75" y="20" fill="#3fb389" text-anchor="middle" font-size="11">enc₁ ×8</text><text x="75" y="35" fill="#9da9b6" text-anchor="middle">win[CAP,8,2]</text><text x="75" y="48" fill="#7fd6b0" text-anchor="middle">→[CAP,256]</text></g>
+          <g transform="translate(340,66)"><rect width="150" height="56" rx="6" fill="#13241d" stroke="#2f8c6b"/><text x="75" y="20" fill="#5cbf99" text-anchor="middle" font-size="11">enc₂ ×16</text><text x="75" y="35" fill="#9da9b6" text-anchor="middle">win[CAP,16,2]</text><text x="75" y="48" fill="#7fd6b0" text-anchor="middle">→[CAP,256]</text></g>
+          <g transform="translate(500,66)"><rect width="150" height="56" rx="6" fill="#13241d" stroke="#2f8c6b"/><text x="75" y="20" fill="#5cbf99" text-anchor="middle" font-size="11">enc₃ ×64</text><text x="75" y="35" fill="#9da9b6" text-anchor="middle">win[CAP,64,2]</text><text x="75" y="48" fill="#7fd6b0" text-anchor="middle">→[CAP,256]</text></g>
+          <g transform="translate(660,66)"><rect width="150" height="56" rx="6" fill="#15201b" stroke="#2a6"/><text x="75" y="20" fill="#4aa385" text-anchor="middle" font-size="11">enc₄ ×256</text><text x="75" y="35" fill="#9da9b6" text-anchor="middle">win[CAP,256,2]</text><text x="75" y="48" fill="#7fd6b0" text-anchor="middle">→[CAP,256]</text></g>
+          <g transform="translate(820,66)"><rect width="160" height="56" rx="6" fill="#15201b" stroke="#2a6"/><text x="80" y="20" fill="#4aa385" text-anchor="middle" font-size="11">enc₅ ×512</text><text x="80" y="35" fill="#9da9b6" text-anchor="middle">win[CAP,512,2]</text><text x="80" y="48" fill="#7fd6b0" text-anchor="middle">→[CAP,256]</text></g>
+        </g>
+        <rect x="20" y="150" width="960" height="28" rx="4" fill="#141b24" stroke="#5aa9e6"/><text x="500" y="168" fill="#5aa9e6" text-anchor="middle">scatter → content [B, L, D] = [4, 1024, 256]</text>
+        <g stroke="#3a4654" fill="none">
+          <path d="M95 38 L95 66"/><path d="M255 38 L255 66"/><path d="M415 38 L415 66"/><path d="M575 38 L575 66"/><path d="M735 38 L735 66"/><path d="M900 38 L900 66"/>
+          <path d="M95 122 L95 150"/><path d="M255 122 L255 150"/><path d="M415 122 L415 150"/><path d="M575 122 L575 150"/><path d="M735 122 L735 150"/><path d="M900 122 L900 150"/>
+        </g>
+      </g>
+    </svg>
+    <p class="cap">ΣMₖ = total OBSERVED tokens in the batch (context + KFF; here 924+1012+917+924 = 3,777 of 4,096); each encoder still runs at CAP=1024 rows with the remainder sentinel-padded. MASK slots (queries) and NA slots (fully-missing patches) get a learned [MASK]/[NA] vector instead of encoder output; pad is sample_id −1. Each encoderₖ is a small MLP/conv (Pₖ·2 inputs → 256).</p>
+  </div>
+</div>
+
+<!-- ===================== STAGE 6 ===================== -->
+<div class="stage">
+  <div class="stage-h"><span class="snum">6</span><h2>Embed — sum of five [B,L,D] parts</h2><div class="io"><span class="in">in:</span> content: f32[B,L,D], side tensors<br><span class="out">out:</span> tokens: float32[B,L,D]</div></div>
+  <div class="stage-b">
+    <p>The token embedding is the elementwise sum of five <span class="shape">[4,1024,256]</span> tensors:</p>
+    <table class="tt">
+      <tr><th>part</th><th>source</th><th>shape</th></tr>
+      <tr><td>content</td><td>Stage 7 — encoder output if <code>content_state==OBSERVED</code>, else learned [MASK]/[NA] vector (selected by content_state)</td><td class="sz">[4,1024,256]</td></tr>
+      <tr><td>time</td><td>continuous embedding of t_center</td><td class="sz">[4,1024,256]</td></tr>
+      <tr><td>span/tier</td><td>learned table[tier_id], 6 rows</td><td class="sz">[4,1024,256]</td></tr>
+      <tr><td>variate ID</td><td>random orthonormal row[variate_uid] + scale-receipt MLP(a,σΔ)</td><td class="sz">[4,1024,256]</td></tr>
+      <tr><td>role_ft</td><td>learned table[role_ft], 2 rows — FEATURE / TARGET (D11)</td><td class="sz">[4,1024,256]</td></tr>
+      <tr><td><b>= tokens</b></td><td>sum</td><td class="g">[4,1024,256]</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ===================== STAGE 8 ===================== -->
+<div class="stage">
+  <div class="stage-h"><span class="snum">8</span><h2>Transformer stack ×N</h2><div class="io"><span class="in">in:</span> tokens: f32[B,L,D], block_mask<br><span class="out">out:</span> hidden: float32[B,L,D]</div></div>
+  <div class="stage-b">
+    <p>Pre-norm blocks (attention + MLP), each using the Stage-5 BlockMask <span class="shape">[4,1024,1024]</span>. Shape is invariant: <span class="shape">[4,1024,256] → [4,1024,256]</span>. No positional encoding added here — position is already in the token embedding.</p>
+  </div>
+</div>
+
+<!-- ===================== STAGE 9 ===================== -->
+<div class="stage">
+  <div class="stage-h"><span class="snum">9</span><h2>Heads &amp; loss</h2><div class="io"><span class="in">in:</span> hidden: f32[B,L,D], batch<br><span class="out">out:</span> loss: float32[] (scalar)</div></div>
+  <div class="stage-b">
+    <table class="tt">
+      <tr><th>path</th><th>head runs on</th><th>head</th><th>output shape</th></tr>
+      <tr><td>horizon</td><td><b>all L slots</b> (dense, static)</td><td>D→16</td><td class="sz">[B,L,16]</td></tr>
+      <tr><td>aux next-patch</td><td><b>all L slots × 6 tier heads</b> (dense, static)</td><td>6 heads D→Pₖ</td><td class="sz">[B,L,Pₖ] ×6</td></tr>
+    </table>
+    <ul>
+      <li><strong>Horizon</strong> (option β — dense, no gather): run the head over the full <span class="shape">[B,L,256]→[B,L,16]</span>, then take the masked mean against <code>horizon_target</code> using <code>target_valid</code> (true only at query slots). Loss = <code>(|pred−tgt|·valid).sum()/valid.sum()</code> — fixed-shape tensors, the selection happens in the reduction, so no dynamic shape and one compile. (~5× wasted matmul on a tiny 256→16 head — negligible.)</li>
+      <li><strong>Aux</strong> (also dense): run all six tier heads over the full <span class="shape">[B,L,256]→[B,L,Pₖ]</span>; each token then picks its <em>own</em> tier's output via <code>tier_id</code>, compared to the collator's raw-time target, masked by <code>valid_aux</code>. Runs 6 heads where 1 would do — accepted, the heads are tiny. Per-tier weight vector (coarse tiers down-weightable).</li>
+      <li><strong>Total</strong>: <code>L = horizon_MAE + λ·Σₖ wₖ·aux_MAEₖ</code>, λ≈0.1–0.3.</li>
+    </ul>
+    <div class="note"><b>Inference</b> replaces loss with: gather query outputs → invert normalization <code>x=sinh(z)·σΔ+a</code> → if horizon &gt; single-pass budget, append &amp; re-anchor &amp; repeat (D6 chunked rollout).</p></div>
+  </div>
+</div>
+
+<footer>
+  <span>tetris · pipeline walkthrough · companion to the decision log</span>
+  <span>L=1024 · D=256 · B=4 · 6 tiers · numbers verified</span>
+</footer>
+
+</div>
+</body>
+</html>
