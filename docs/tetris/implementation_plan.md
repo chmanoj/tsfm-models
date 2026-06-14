@@ -63,6 +63,25 @@ pack(buffers: list[list[AssembledSegment]], *, l_pack, p_out, num_buffers=None) 
   selection/masking deferred to the S8 loss reduction. `tetris.forward` returns raw
   head outputs (`ModelOutput{horizon, aux}`); loss + inversion are S8.
 
+**Loss reconciliation (post-S8 — pinned, do not re-flag):**
+- **Aux targets use the base scale `σΔ[0]` (walkthrough-faithful), NOT D10's
+  per-tier locally-reanchored `σΔ[1..5]`.** The decision log D6/D10 (+ `normalize.
+  aux_target`) call for per-tier step-vol re-anchoring, but the **frozen S6 Batch**
+  carries only base-scale `norm_values` + `valid_aux`; honoring D10 would reopen the
+  collator. Decided: keep base scale — aux is auxiliary and damped by `aux_weights`,
+  and `test_aux_boundary` (validity masking) is independent of the choice. Therefore
+  **`config.norm.loss_target` is not yet wired** (locally_reanchored vs
+  global_norm_space is a later iteration); `loss_space` honors `arcsinh` (default),
+  `vol_units` raises `NotImplementedError` (deferred).
+- **Aux target gather:** for a tier-`k` token, the next `P_k` raw steps
+  `[raw_start+P_k, raw_start+2P_k)` from the buffer's `norm_values`; masked by
+  `tier_id==k & valid_aux` **and** the target steps' `observed` bit + in-range
+  guard. `valid_aux` (collator) is the precise raw-time check (origin-crossing →
+  horizon's job; history-edge → unavailable). `total = horizon_MAE + Σ_k
+  aux_weights[k]·aux_MAE_k` (the `aux_weights[6]` vector replaces a single λ).
+- **Metrics (D13):** v1 records **test loss only** (horizon MAE on a shard);
+  **MASE deferred (O4)** — `seasonal_naive_denom`/`mase` are stubs.
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).
