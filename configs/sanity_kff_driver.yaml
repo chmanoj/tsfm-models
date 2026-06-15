@@ -1,0 +1,43 @@
+# Sanity stage — kff_driver: target = periodic(past) + unpredictable driver feature.
+# The driver is sparse random impulses (NOT extrapolable). A model that sees only
+# past features must miss every horizon spike (bad prediction); with the driver's
+# known future (KFF) it recovers them. Proves known-future covariates are needed
+# (D11). The run also reports the KFF-on vs past-only contrast on the same model.
+
+run:
+  name: sanity_kff_driver
+  steps: 6000
+  seed: 0
+
+backend:
+  device: auto
+  compile: false
+
+model:
+  d_model: 64
+  n_layers: 3
+  n_heads: 4
+  out_patch: 8
+
+data:
+  loader: sanity
+  case: kff_driver
+  season_lengths: [12, 24, 48]
+  horizon: 32
+  series_len: 512
+  n_series: 64
+  n_channels: 2                 # [driver; target]
+  known_future_features: true   # reveal the driver's future at eval (D11 KFF)
+  kff_reveal_prob: 1.0          # always reveal the driver's future in training too
+
+packing:
+  L_pack: 256
+  buffers_per_step: 4
+  reservoir: true
+  reservoir_k: 64
+  scheduler_window: 64
+
+eval:
+  enabled: true
+  loader: sanity_eval
+  shard_windows: 64

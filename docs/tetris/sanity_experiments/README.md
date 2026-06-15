@@ -18,9 +18,13 @@ and to *beat* it where there's learnable structure under the noise.
 |---|---|---|---|---|---|---|---|---|
 | [sine_univariate](#sine_univariate) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 1500 | 1m47s | **0.812** | 0.981 | **0.83** | ✅ beats naive |
 | [multivariate_independent](#multivariate_independent) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 6000 | 6m31s | **0.895** | 0.994 | **0.90** | ✅ beats naive |
-| shared_factor | — | — | — | — | — | — | — | pending |
-| features_target (+KFF) | — | — | — | — | — | — | — | pending |
+| [shared_factor](#shared_factor) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 6000 | 6m48s | **0.629** | 0.951 | **0.66** | ✅ beats naive |
+| [features_target](#features_target) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 6000 | 7m21s | **0.717** | 0.854 | **0.84** | ✅ beats naive |
+| [kff_driver](#kff_driver) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 2000 | 2m20s | **0.338** | 1.043 | **0.32** | ✅ KFF needed |
 | all cases mixed | — | — | — | — | — | — | — | pending |
+
+For **kff_driver** the headline is the KFF vs past-only contrast (same model): KFF-on
+MASE **0.338** vs past-only **0.789** — the known-future covariate cuts error ~57%.
 
 ## Planned (v2) — frequency stress test
 
@@ -109,3 +113,83 @@ distinct per-channel frequencies under a varying channel count — variate-id ke
 the channels separate. 6000 steps in 6m31s (~65 ms/step).
 
 ![multivariate_independent](plots/multivariate_independent.png)
+
+---
+
+## shared_factor
+
+`C` channels are random linear combos of a shared bank of sine factors (periods
+drawn per sample from `[12,24,48]`; channel count `[2,6]`). Channels that share
+factors **correlate** — the D4 cross-channel routing signal. Each channel's
+declared seasonality is its dominant factor's period; because each series is a
+mixture, single-period seasonal-naive is a weak baseline.
+
+```bash
+uv run python -m tetris.train.sanity_run configs/sanity_shared_factor.yaml --steps 6000 --eval-every 1000
+```
+
+Same model (2.06M params), CPU. 64 series, 2–6 channels (262 channel scores).
+
+| step | train_loss | model MASE | skill |
+|---|---|---|---|
+| 0 (random) | — | 5.126 | 5.39 |
+| 2000 | 0.305 | 0.830 | 0.87 |
+| 4000 | 0.293 | 0.671 | 0.71 |
+| 6000 | 0.252 | **0.629** | **0.66** |
+
+The strongest result so far (skill 0.66): the shared periodic structure gives the
+model real cross-channel signal to exploit, which a per-channel naive cannot. The
+model tracks the mixture closely while seasonal-naive drifts off. 6000 steps in
+6m48s.
+
+![shared_factor](plots/shared_factor.png)
+
+---
+
+## features_target
+
+A lagged feature drives the target: `target[t] = feature[t-k] + noise`, features-first
+`[feature; target]` (nf=1, nt=1), feature period drawn per sample from `[12,24,48]`.
+Checks covariate routing (D5/A3) — a channel-independent baseline cannot capture the
+lagged edge. The feature future is *not* revealed (past-only covariate), so the model
+relies on the feature's observed past plus its learned periodicity to extrapolate.
+
+```bash
+uv run python -m tetris.train.sanity_run configs/sanity_features_target.yaml --steps 6000 --eval-every 1500
+```
+
+Result: model MASE 4.84 (random) → **0.717**, beating seasonal naive (0.854). The
+model routes the lagged covariate into the target forecast. (Plot shows the target
+channel only — the feature is an input, not forecast.)
+
+![features_target](plots/features_target.png)
+
+---
+
+## kff_driver
+
+Built to make **known-future features (D11) strictly necessary**:
+`target_t = 0.3·periodic_t + 0.7·driver_t`. The **driver** is a dense, aperiodic
+known-future covariate (standardized random walk) — *unpredictable from its past* —
+and it is 70% of every target step. The periodic part (30%) is past-derivable. So a
+model that sees only the feature's **past** structurally cannot predict the target;
+it must read the driver's **revealed future** (KFF). Training reveals the driver's
+future (`kff_reveal_prob: 1.0`) so the model learns to use it; eval reveals it too
+(`known_future_features: true`).
+
+```bash
+uv run python -m tetris.train.sanity_run configs/sanity_kff_driver.yaml --steps 2000 --eval-every 1000
+```
+
+| eval | model MASE | vs naive (1.043) |
+|---|---|---|
+| **KFF-on** (future revealed) | **0.338** | skill 0.32 ✅ |
+| past-only (future hidden) | 0.789 | — |
+
+The same trained model scores **0.338 with KFF vs 0.789 without** — KFF cuts error
+~57%. In the plot the blue **model (KFF)** tracks the random-walk-driven target while
+the green **model (past-only)** drifts off and seasonal-naive is far off — a direct,
+visual demonstration that the architecture both *needs* and *uses* known-future
+covariates. 2000 steps suffices here.
+
+![kff_driver](plots/kff_driver.png)

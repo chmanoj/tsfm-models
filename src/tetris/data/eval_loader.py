@@ -48,19 +48,25 @@ from .contract import EvalItem, to_train_item, validate_item
 # --- fixed-origin eval segment (mirrors window_sampler's budget math) ----------
 
 def eval_spec(n_features: int, n_targets: int, t_ctx: int, p: int,
-              params: SamplerParams) -> SegmentSpec:
+              params: SamplerParams, *, kff_features: bool = False) -> SegmentSpec:
     """A :class:`SegmentSpec` with origin pinned at the context end and fixed ``p``.
 
     Identical budget arithmetic to ``window_sampler.sample_window`` (per-channel
     token allowance, telescope coverage clipped to history) but **deterministic**:
-    no random origin/horizon, no KFF reveal. Eval items pack one-per-buffer, so
-    ``S ≤ L`` must hold — guaranteed while ``Q_total < L`` (modest benchmark ``p``).
+    no random origin/horizon. Eval items pack one-per-buffer, so ``S ≤ L`` must
+    hold — guaranteed while ``Q_total < L`` (modest benchmark ``p``).
+
+    ``kff_features`` (D11): when set, the feature channels are marked **KFF** so
+    their revealed future is tokenized as observed CTX feature tokens at ``t>0``
+    (``K = n_features·q_tok`` extra slots); otherwise features are past-only.
     """
     C = n_features + n_targets
-    channel_roles = [int(ChannelRole.FEATURE)] * n_features + [int(ChannelRole.TARGET)] * n_targets
     q_tok = ceil(p / params.p_out)
+    feat_role = int(ChannelRole.KFF) if kff_features else int(ChannelRole.FEATURE)
+    channel_roles = [feat_role] * n_features + [int(ChannelRole.TARGET)] * n_targets
     Q = n_targets * q_tok
-    Q_total = Q  # no KFF in eval
+    K = (n_features * q_tok) if kff_features else 0   # KFF future tokens (D11)
+    Q_total = Q + K
     n = max(1, (params.l_pack - Q_total) // C)
     origin = t_ctx  # forecast origin = context boundary (the held-out split point)
 
@@ -72,7 +78,7 @@ def eval_spec(n_features: int, n_targets: int, t_ctx: int, p: int,
     return SegmentSpec(
         C=C, n_features=n_features, n_targets=n_targets,
         origin=origin, p=p, channel_roles=channel_roles,
-        Q=Q, K=0, Q_total=Q_total, n=n, counts=counts,
+        Q=Q, K=K, Q_total=Q_total, n=n, counts=counts,
     )
 
 
@@ -94,8 +100,13 @@ def eval_batch(item: EvalItem, params: SamplerParams, *, p_out: int, l_pack: int
     full = torch.full((C, t_ctx + p), float("nan"), dtype=torch.float32)
     full[:, :t_ctx] = data
     full[nf:, t_ctx:] = item.y_true.to(torch.float32).T  # [p, nt] -> [nt, p]
+    # D11 KFF: reveal known-future covariates so assemble encodes them as CTX
+    # feature tokens at t>0 (target rows stay [MASK]; no leakage of y_true).
+    kff = item.feature_future is not None and nf > 0
+    if kff:
+        full[:nf, t_ctx:] = item.feature_future.to(torch.float32).T  # [p, nf] -> [nf, p]
 
-    spec = eval_spec(nf, nt, t_ctx, p, params)
+    spec = eval_spec(nf, nt, t_ctx, p, params, kff_features=kff)
     seg = assemble((full, nf, nt), spec, p_out)
     return pack([[seg]], l_pack=l_pack, p_out=p_out)
 

@@ -42,16 +42,25 @@ def plot_eval_samples(forward, eval_loader, cfg, *, out_path: str, n: int = 3,
     p_out = cfg.model.out_patch
     nt_max = max(items[i].num_targets for i in idxs)
 
-    fig, axes = plt.subplots(len(idxs), nt_max, figsize=(5.0 * nt_max, 2.6 * len(idxs)),
-                             squeeze=False)
-    for row, i in enumerate(idxs):
-        item = items[i]
-        nf, nt = item.num_features, item.num_targets
-        batch = eval_batch(item, params, p_out=p_out, l_pack=cfg.packing.L_pack).to(device)
+    def _forecast(it):
+        batch = eval_batch(it, params, p_out=p_out, l_pack=cfg.packing.L_pack).to(device)
         gen = torch.Generator(device=device).manual_seed(basis_seed)
         basis = make_basis(batch, cfg.model.d_model, device=device, generator=gen)
         out = forward(batch, variate_basis=basis)
-        forecast = horizon_forecast_raw(out, batch, item, p_out=p_out).cpu()  # [p, nt]
+        return horizon_forecast_raw(out, batch, it, p_out=p_out).cpu()  # [p, nt]
+
+    fig, axes = plt.subplots(len(idxs), nt_max, squeeze=False,
+                             figsize=(max(11.0, 5.0 * nt_max), 2.7 * len(idxs) + 0.6),
+                             constrained_layout=True)
+    for row, i in enumerate(idxs):
+        item = items[i]
+        nf, nt = item.num_features, item.num_targets
+        forecast = _forecast(item)
+        # KFF cases: a counterfactual forecast with the feature future hidden, to
+        # show the model fails without the known-future covariate (past-only).
+        forecast_po = None
+        if item.feature_future is not None:
+            forecast_po = _forecast(item._replace(feature_future=None))
 
         for ti in range(nt_max):
             ax = axes[row][ti]
@@ -70,15 +79,17 @@ def plot_eval_samples(forward, eval_loader, cfg, *, out_path: str, n: int = 3,
 
             ax.plot(xs_ctx, ctx[-show:], color="0.6", lw=1, label="context")
             ax.plot(xs_h, y_true, color="black", lw=2, label="actual")
-            ax.plot(xs_h, forecast[:, ti], color="tab:blue", marker=".", label="model")
+            model_label = "model (KFF)" if forecast_po is not None else "model"
+            ax.plot(xs_h, forecast[:, ti], color="tab:blue", marker=".", label=model_label)
+            if forecast_po is not None:
+                ax.plot(xs_h, forecast_po[:, ti], color="tab:green", ls=":", marker="x",
+                        ms=4, label="model (past-only)")
             ax.plot(xs_h, snaive, color="tab:orange", ls="--", label="seasonal_naive")
             ax.axvline(t_ctx - 0.5, color="red", alpha=0.3, lw=1)
             ax.set_title(f"series {i} · ch{ch} (m={m})", fontsize=8)
             if row == 0 and ti == 0:
                 ax.legend(loc="upper left", fontsize=7, ncol=2)
-    fig.suptitle(f"{cfg.run.name}: actual vs model vs seasonal-naive "
-                 f"({len(idxs)} eval samples × all target channels)", fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    fig.suptitle(f"{cfg.run.name} — actual vs model vs seasonal-naive", fontsize=12)
     fig.savefig(out_path, dpi=110)
     plt.close(fig)
     return out_path

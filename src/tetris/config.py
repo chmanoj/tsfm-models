@@ -84,6 +84,13 @@ class DataCfg:
     # If non-empty [lo, hi], draw C per sample (varies channel count across samples,
     # for the multivariate cases); empty -> fixed n_channels.
     channels_distribution: List[int] = field(default_factory=list)
+    # Reveal the held-out future of feature channels to the eval (D11 KFF); the
+    # training path reveals KFF among native features w.p. kff_reveal_prob.
+    known_future_features: bool = False
+    # Per native feature, probability of revealing its known future during training
+    # (D11). 0 -> never (default). Set high when the target genuinely depends on a
+    # known-future covariate so the model learns to use it.
+    kff_reveal_prob: float = 0.0
     # Download root for the real GIFT-Eval tree (lazy; threaded to the eval loader).
     local_dir: str = ""
 

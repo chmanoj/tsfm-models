@@ -152,10 +152,10 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     log_every = max(1, eval_every // 5)
 
     def _on_log(step, loss):
-        log.info("step %5d: train_loss=%.4f", step, loss)
+        log.info("step %5d/%d: train_loss=%.4f", step, steps, loss)
 
     def _on_eval(step, r, loss):
-        log.info("step %5d: train_loss=%.4f  %s  [eval]", step, loss, _fmt(r))
+        log.info("step %5d/%d: train_loss=%.4f  %s  [eval]", step, steps, loss, _fmt(r))
 
     t0 = time.perf_counter()
     losses = run_training(
@@ -172,6 +172,22 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     final = evaluate_mase(model, eval_loader, cfg, device=device)
     log.info("FINAL: %s  => %s seasonal naive", _fmt(final),
              "BEATS" if final["skill"] < 1 else "does NOT beat")
+
+    # KFF counterfactual: re-eval the SAME model with the feature future toggled,
+    # to show known-future covariates are actually needed (D11). Only when the case
+    # has feature channels.
+    if eval_loader[0].num_features > 0:
+        import copy
+
+        cf = copy.deepcopy(cfg)
+        cf.data.known_future_features = not cfg.data.known_future_features
+        cf_loader = build_eval_loader(cf, local_dir=cf.data.local_dir or None)
+        cf_res = evaluate_mase(model, cf_loader, cf, device=device)
+        on, off = (final, cf_res) if cfg.data.known_future_features else (cf_res, final)
+        log.info("KFF contrast: KFF-on model_MASE=%.4f  vs  past-only model_MASE=%.4f  "
+                 "(KFF cuts error %.0f%%)",
+                 on["model_mase"], off["model_mase"],
+                 100.0 * (1 - on["model_mase"] / off["model_mase"]) if off["model_mase"] else float("nan"))
 
     plot_path = plot_eval_samples(
         model, eval_loader, cfg, out_path=str(run_dir / "samples.png"),

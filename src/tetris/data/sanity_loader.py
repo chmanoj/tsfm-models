@@ -60,6 +60,7 @@ def make_sanity_eval_shard(cfg) -> List[EvalItem]:
     """Matched eval shard: the *same* sanity series, last ``horizon`` steps held
     out as ``y_true`` with the dataset-provided ``season_length`` (for MASE)."""
     spec = SanitySpec.from_cfg(cfg)
+    kff = bool(getattr(cfg.data, "known_future_features", False))
     p = spec.horizon
     items: List[EvalItem] = []
     for idx in range(spec.n_series):
@@ -67,11 +68,14 @@ def make_sanity_eval_shard(cfg) -> List[EvalItem]:
         m = seasons[nf]  # series-level seasonality = first target channel's period
         context = torch.from_numpy(np.ascontiguousarray(data[:, :-p], dtype=np.float32))
         y_true = torch.from_numpy(np.ascontiguousarray(data[nf:, -p:].T, dtype=np.float32))
+        feat_future = None
+        if kff and nf > 0:  # reveal feature-channel futures (D11 KFF)
+            feat_future = torch.from_numpy(np.ascontiguousarray(data[:nf, -p:].T, dtype=np.float32))
         mtag = m if len(set(seasons[nf:])) == 1 else "x".join(str(s) for s in seasons[nf:])
         items.append(EvalItem(
             data_tensor=context, num_features=nf, num_targets=nt,
             y_true=y_true, naive_denom=None,
             config_id=f"sanity/{spec.case}/m{mtag}/series_{idx}",
-            season_length=m, channel_seasons=seasons,
+            season_length=m, channel_seasons=seasons, feature_future=feat_future,
         ))
     return items

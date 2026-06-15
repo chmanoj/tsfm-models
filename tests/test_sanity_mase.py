@@ -88,6 +88,45 @@ def test_sanity_pipeline_learns_sine(tmp_path):
     assert after["model_mase"] < base["model_mase"]
 
 
+def test_kff_eval_reveals_feature_future_without_leaking_targets(tmp_path):
+    cfg = _tiny_cfg(tmp_path, case="features_target", n_channels=2,
+                    known_future_features=True)
+    eval_loader = build_eval_loader(cfg)
+    e0 = eval_loader[0]
+    assert e0.num_features == 1 and e0.num_targets == 1
+    # KFF: feature future is revealed, shaped [p, num_features]
+    assert e0.feature_future is not None
+    assert tuple(e0.feature_future.shape) == (cfg.data.horizon, e0.num_features)
+    # the context itself never contains the held-out horizon (no target leak)
+    assert e0.data_tensor.shape[1] == cfg.data.series_len - cfg.data.horizon
+
+    # non-KFF default keeps the feature future hidden
+    cfg2 = _tiny_cfg(tmp_path, case="features_target", n_channels=2)
+    assert build_eval_loader(cfg2)[0].feature_future is None
+
+
+def test_kff_tokens_are_built_for_known_future_features(tmp_path):
+    # eval_spec with kff_features marks the feature channels KFF and allocates
+    # K = n_features * q_tok future tokens (the bug fix: features were past-only).
+    from tetris.data.eval_loader import eval_batch, eval_spec
+    from tetris.tokenize.window_sampler import SamplerParams
+    from tetris.constants import ContentState, Role
+
+    cfg = _tiny_cfg(tmp_path, case="kff_driver", n_channels=2,
+                    known_future_features=True)
+    params = SamplerParams(l_pack=cfg.packing.L_pack, p_out=cfg.model.out_patch,
+                           tier_prior=tuple(cfg.model.tier_alloc_per_channel))
+    spec = eval_spec(1, 1, 100, cfg.data.horizon, params, kff_features=True)
+    assert spec.K == 1 * spec.q_tok and spec.Q_total == spec.Q + spec.K
+
+    item = build_eval_loader(cfg)[0]
+    b = eval_batch(item, params, p_out=cfg.model.out_patch, l_pack=cfg.packing.L_pack)
+    role, chan, tc, cs = b.role[0], b.channel_idx[0], b.t_center[0], b.content_state[0]
+    # feature channel 0 has OBSERVED CTX tokens at t_center>0 == the KFF future tokens
+    kff = (chan == 0) & (role == int(Role.CTX)) & (tc > 0) & (cs == int(ContentState.OBSERVED))
+    assert int(kff.sum()) == spec.q_tok
+
+
 def test_run_sanity_writes_artifacts(tmp_path, monkeypatch):
     import tetris.train.sanity_run as sr
 

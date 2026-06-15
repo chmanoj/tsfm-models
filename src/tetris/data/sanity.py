@@ -29,6 +29,7 @@ SANITY_CASES = (
     "multivariate_independent",  # C independent sines, same m (variate-id separation)
     "shared_factor",           # C channels = combos of a shared periodic factor bank (D4)
     "features_target",         # lagged feature drives target (covariate routing, D5/A3)
+    "kff_driver",              # target = periodic(past) + unpredictable feature (KFF needed), D11
 )
 
 
@@ -104,11 +105,44 @@ def gen_features_target(rng, n: int, C: int, noise_frac: float, pool):
     return np.stack([feature, target]), 1, 1, [m, m]
 
 
+# Fraction of every target step that comes from the contemporaneous known-future
+# driver (the rest comes from the target's own past-derivable structure). High, so
+# a past-only model structurally cannot do well — it must learn to read KFF. The
+# horizon has few query patches, so we weight KFF heavily to force the model to use
+# it (per the data-design note: target_t = (1-w)·past + w·kff_t).
+_KFF_WEIGHT = 0.7
+
+
+def gen_kff_driver(rng, n: int, C: int, noise_frac: float, pool):
+    """``target_t = (1-w)·periodic_t  +  w·driver_t``  with ``w = _KFF_WEIGHT``.
+
+    Features-first ``[driver; target]`` (nf=1, nt=1). The **driver** is a dense,
+    **aperiodic** known-future covariate (standardized random walk) — unpredictable
+    from its own past beyond persistence, so a past-only model misses most of every
+    horizon step; with the driver's known future revealed (KFF, D11) the target is
+    recoverable. The **periodic** part is past-derivable (the model learns ``m`` from
+    history), so the model must combine *past* (periodic) and *known-future* (driver)
+    information. Because the driver is dense and dominant, the loss rewards using KFF
+    at every step (unlike a sparse signal the model can write off)."""
+    m = _draw_period(rng, pool)
+    t = np.arange(n, dtype=np.float64)
+    phase = rng.uniform(0.0, 2.0 * np.pi)
+    periodic = np.sin(2.0 * np.pi * t / m + phase)                  # ~unit, past-derivable
+    driver = np.cumsum(rng.normal(0.0, 1.0, n))                     # aperiodic random walk
+    driver = (driver - driver.mean()) / (driver.std() + 1e-9)       # standardized, ~unit
+    w = _KFF_WEIGHT
+    amp = rng.uniform(1.0, 4.0)
+    offset = rng.uniform(-5.0, 5.0)
+    target = offset + amp * ((1.0 - w) * periodic + w * driver) + rng.normal(0.0, noise_frac, n)
+    return np.stack([driver, target]), 1, 1, [m, m]
+
+
 _GENERATORS = {
     "sine_univariate": gen_sine_univariate,
     "multivariate_independent": gen_multivariate_independent,
     "shared_factor": gen_shared_factor,
     "features_target": gen_features_target,
+    "kff_driver": gen_kff_driver,
 }
 
 

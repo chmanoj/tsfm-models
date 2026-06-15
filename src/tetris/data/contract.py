@@ -37,6 +37,7 @@ class EvalItem(NamedTuple):
     config_id: str                         # which of the 97 GIFT-Eval configs
     season_length: Optional[int] = None    # dataset-provided seasonality m for MASE (O4); None -> unknown
     channel_seasons: Optional[List[int]] = None  # per-channel m (multi-freq sanity); falls back to season_length
+    feature_future: Optional[torch.Tensor] = None  # [p, num_features] known-future covariates (D11 KFF); None -> hidden
 
 
 def to_train_item(e: EvalItem) -> Item:
