@@ -17,7 +17,7 @@ and are stripped before packing (no leakage, no training-path fork).
 
 from __future__ import annotations
 
-from typing import Iterator, NamedTuple, Optional, Protocol, Tuple, runtime_checkable
+from typing import Iterator, List, NamedTuple, Optional, Protocol, Tuple, runtime_checkable
 
 import torch
 
@@ -35,6 +35,9 @@ class EvalItem(NamedTuple):
     y_true: torch.Tensor                   # held-out horizon, [p, num_targets]
     naive_denom: Optional[torch.Tensor]    # seasonal-naive denominator; deferred (O4) -> None in v1
     config_id: str                         # which of the 97 GIFT-Eval configs
+    season_length: Optional[int] = None    # dataset-provided seasonality m for MASE (O4); None -> unknown
+    channel_seasons: Optional[List[int]] = None  # per-channel m (multi-freq sanity); falls back to season_length
+    feature_future: Optional[torch.Tensor] = None  # [p, num_features] known-future covariates (D11 KFF); None -> hidden
 
 
 def to_train_item(e: EvalItem) -> Item:
@@ -80,4 +83,42 @@ def build_loader(cfg, *, rank: int = 0, world_size: int = 1):
         from .standin_loader import StandInPretrainLoader
 
         return StandInPretrainLoader.from_cfg(cfg, rank=rank, world_size=world_size)
-    raise NotImplementedError(f"loader {name!r} is wired in a later stage (S12 for gifteval_test)")
+    if name == "sanity":
+        from .sanity_loader import SanityTrainLoader
+
+        return SanityTrainLoader.from_cfg(cfg, rank=rank, world_size=world_size)
+    if name == "gifteval_test_overfit":
+        # G3: the real GIFT-Eval test split's contexts as training Items (Item-only;
+        # in-distribution overfit). Lazy/network — needs the gift_eval extras + data.
+        from .gifteval_overfit_loader import GiftEvalTestOverfitLoader
+
+        return GiftEvalTestOverfitLoader.from_cfg(cfg, rank=rank, world_size=world_size)
+    raise NotImplementedError(
+        f"training loader {name!r} unknown; GIFT-Eval is record-only — use build_eval_loader"
+    )
+
+
+def build_eval_loader(cfg, *, local_dir: Optional[str] = None):
+    """Factory for the record-only eval loader (§6, S12), keyed by ``cfg.eval.loader``.
+
+    ``gifteval_test`` is the real GIFT-Eval download (O1; lazy/network — needs
+    ``local_dir``); ``synthetic_eval`` is the offline synthetic shard used by tests
+    and the shakedown. Both yield :class:`EvalItem`; ``EvalItem`` never enters the
+    training ``build_loader``/reservoir path (it is stripped via ``to_train_item``)."""
+    from .eval_loader import GiftEvalEvalLoader
+
+    name = cfg.eval.loader
+    if name == "gifteval_test":
+        # Resolve the storage root: explicit arg -> cfg.data.local_dir -> $GIFT_EVAL
+        # (from_download falls back to the env var when this is empty).
+        resolved = local_dir or cfg.data.local_dir or ""
+        return GiftEvalEvalLoader.from_download(cfg, local_dir=resolved)
+    if name == "synthetic_eval":
+        return GiftEvalEvalLoader.from_synthetic(cfg, n_items=cfg.eval.shard_windows, seed=cfg.run.seed)
+    if name == "sanity_eval":
+        from .sanity_loader import make_sanity_eval_shard
+
+        return GiftEvalEvalLoader(make_sanity_eval_shard(cfg))
+    raise NotImplementedError(
+        f"eval loader {name!r} unknown (use gifteval_test | synthetic_eval | sanity_eval)"
+    )

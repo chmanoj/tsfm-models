@@ -70,13 +70,61 @@ class DataCfg:
     )
     # D13 mixture: multiplier 0 removes a dataset (mass renormalized over survivors).
     dataset_weights: Dict[str, float] = field(default_factory=dict)
+    # --- sanity stage (simple-synthetic train->test, scored vs seasonal naive) ---
+    # The sanity loaders ('sanity' train / 'sanity_eval' eval) generate periodic
+    # series whose season length is dataset metadata (never detected by the model),
+    # mirroring GIFT-Eval's test split. `case` selects the generator family;
+    # `season_lengths` is the calendar-style period pool (e.g. weekly=7, daily=24);
+    # `horizon` is the held-out forecast length; `series_len` the per-series length.
+    case: str = "sine_univariate"   # one of SANITY_CASES, or "mixed"
+    mix_cases: List[str] = field(default_factory=list)  # used when case == "mixed" (empty -> all)
+    season_lengths: List[int] = field(default_factory=lambda: [24])
+    horizon: int = 32
+    series_len: int = 512
+    n_channels: int = 4                  # C for multivariate sanity cases (fixed)
+    # If non-empty [lo, hi], draw C per sample (varies channel count across samples,
+    # for the multivariate cases); empty -> fixed n_channels.
+    channels_distribution: List[int] = field(default_factory=list)
+    # Reveal the held-out future of feature channels to the eval (D11 KFF); the
+    # training path reveals KFF among native features w.p. kff_reveal_prob.
+    known_future_features: bool = False
+    # Per native feature, probability of revealing its known future during training
+    # (D11). 0 -> never (default). Set high when the target genuinely depends on a
+    # known-future covariate so the model learns to use it.
+    kff_reveal_prob: float = 0.0
+    # Download root for the real GIFT-Eval tree (lazy; threaded to the eval loader).
+    local_dir: str = ""
+    # GIFT-Eval horizon terms (short|medium|long = ×1/10/15). The leaderboard scores
+    # each config across ALL applicable terms simultaneously, so this is a list, not a
+    # scalar; config_id = "{name}/{term}". Shared by the test-as-training overfit loader
+    # (G3) and the real eval loader so train/eval windows use the same terms. Every
+    # configured term is attempted on every config; a (config, term) yielding zero
+    # valid test windows (series too short for the ×10/×15 horizon, or a gluonts split
+    # error) is skipped, not fabricated (no hardcoded applicability list to drift from
+    # the benchmark).
+    terms: List[str] = field(default_factory=lambda: ["short", "medium", "long"])
 
 
 @dataclass
 class PackingCfg:
     L_pack: int = 1024             # -> 2048 expansion (D12)
+    # Max query (horizon) tokens budgeted per segment — a first-class budget
+    # alongside L_pack (G3.1). Bounds how much horizon a single forward pass may
+    # predict: `Q_total = n_horizon_channels · q_tok ≤ max_query_tokens`. Training
+    # truncates the sampled horizon to this; eval/inference covers the full
+    # benchmark horizon by *iterating* (autoregressive rollout, ceil(p/p_pred)
+    # passes). Set per config (essential, like L_pack); the sampler additionally
+    # clamps the budget to `L_pack − C` at runtime so ≥1 context token always fits.
+    max_query_tokens: int = 256
     buffers_per_step: int = 8      # B
     reservoir: bool = True         # trivial path flips this off (Stage 10)
+    # Streaming packer (S11/D9.3): reservoir size K (doubles as shuffle buffer);
+    # a buffer is emitted once its residual drops below tail_tolerance·L_pack
+    # (or nothing else fits). Scheduler window W (64–256 buffers) is cost-sorted
+    # (D9.4) and chunked into similar-cost B-buffer steps.
+    reservoir_k: int = 1000        # K ≈ 1000 (D9.3)
+    scheduler_window: int = 128    # W ∈ [64, 256] (D9.4)
+    tail_tolerance: float = 0.05   # emit when residual < tail_tolerance·L_pack
 
 
 @dataclass
@@ -99,7 +147,25 @@ class LossCfg:
 class EvalCfg:
     enabled: bool = True
     loader: str = "gifteval_test"
-    shard_windows: int = 100  # "first 100 windows per config" (record-only)
+    shard_windows: int = 100  # global window cap for the record-only synthetic/sanity scorers
+    # Per-config item cap for the real GIFT-Eval leaderboard (G2): the deterministic
+    # first-N test windows *per config* (and train series per config for iter_train_items).
+    # Default 10 (fast dev eval); -1 -> all items (full, slow). Maintainer's G2 choice
+    # (deviates from the prompt's default 100). Distinct from shard_windows, which is the
+    # global cap used by evaluate_test_loss / evaluate_mase on the synthetic/sanity shards.
+    items_per_config: int = 10
+
+
+@dataclass
+class TrackingCfg:
+    # Experiment-tracker seam (G1). Default backend is wandb with graceful
+    # degradation: online -> offline (no account/network) -> disabled (no-op) when
+    # `wandb` isn't installed, so CI + Mac dev never depend on it. `none` forces off.
+    backend: str = "wandb"          # wandb | none
+    project: str = "tetris"
+    # auto -> online iff logged-in AND wandb host reachable, else offline. Explicit
+    # online|offline|disabled pass through; the WANDB_MODE env var overrides all.
+    mode: str = "auto"              # auto | online | offline | disabled
 
 
 @dataclass
@@ -120,6 +186,7 @@ class Config:
     norm: NormCfg = field(default_factory=NormCfg)
     loss: LossCfg = field(default_factory=LossCfg)
     eval: EvalCfg = field(default_factory=EvalCfg)
+    tracking: TrackingCfg = field(default_factory=TrackingCfg)
     checks: ChecksCfg = field(default_factory=ChecksCfg)
 
     def __post_init__(self) -> None:
@@ -136,6 +203,14 @@ class Config:
             raise ValueError("model.tier_alloc_per_channel entries must be positive (ratio prior)")
         if self.model.encoder_cap < 0:
             raise ValueError("model.encoder_cap must be >= 0 (0 resolves to packing.L_pack)")
+        if self.packing.max_query_tokens < 1:
+            raise ValueError("packing.max_query_tokens must be >= 1 (query-token budget, G3.1)")
+        if self.packing.reservoir_k < 1:
+            raise ValueError("packing.reservoir_k must be >= 1")
+        if self.packing.scheduler_window < 1:
+            raise ValueError("packing.scheduler_window must be >= 1")
+        if not (0.0 <= self.packing.tail_tolerance < 1.0):
+            raise ValueError("packing.tail_tolerance must be in [0, 1)")
         if len(self.loss.aux_weights) != V:
             raise ValueError(f"loss.aux_weights must have {V} entries; got {self.loss.aux_weights}")
         if self.norm.input_norm not in ("anchored_arcsinh", "zscore_arcsinh"):
@@ -144,6 +219,16 @@ class Config:
             raise ValueError(f"unknown norm.loss_target={self.norm.loss_target!r}")
         if self.norm.loss_space not in ("arcsinh", "vol_units"):
             raise ValueError(f"unknown norm.loss_space={self.norm.loss_space!r}")
+        if self.eval.items_per_config != -1 and self.eval.items_per_config < 1:
+            raise ValueError(
+                f"eval.items_per_config must be -1 (all) or >= 1; got {self.eval.items_per_config}"
+            )
+        if not self.data.terms or any(t not in ("short", "medium", "long") for t in self.data.terms):
+            raise ValueError(f"data.terms must be a non-empty subset of short|medium|long; got {self.data.terms}")
+        if self.tracking.backend not in ("wandb", "none"):
+            raise ValueError(f"unknown tracking.backend={self.tracking.backend!r}")
+        if self.tracking.mode not in ("auto", "online", "offline", "disabled"):
+            raise ValueError(f"unknown tracking.mode={self.tracking.mode!r}")
 
 
 def resolved_encoder_cap(cfg: "Config") -> int:

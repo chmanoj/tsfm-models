@@ -217,3 +217,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .DS_Store
+
+# TETRIS model run artifacts (configs/logs/plots) — not tracked
+outputs/
+prompts/

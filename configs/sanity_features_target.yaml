@@ -1,0 +1,41 @@
+# Sanity stage — features_target: a lagged feature drives the target (nf=1, nt=1).
+# Checks covariate routing (D5/A3): the target = feature lagged by k, so a
+# channel-independent baseline cannot capture it. Without KFF the model relies on
+# the feature's observed past + its learned periodicity to extrapolate.
+
+run:
+  name: sanity_features_target
+  steps: 1500
+  seed: 0
+
+backend:
+  device: auto
+  compile: false
+
+model:
+  d_model: 64
+  n_layers: 3
+  n_heads: 4
+  out_patch: 8
+
+data:
+  loader: sanity
+  case: features_target
+  season_lengths: [12, 24, 48]
+  horizon: 32
+  series_len: 512
+  n_series: 64
+  n_channels: 2   # [feature; target]
+
+packing:
+  L_pack: 256
+  max_query_tokens: 128   # per-pass horizon-token budget (G3.1)
+  buffers_per_step: 4
+  reservoir: true
+  reservoir_k: 64
+  scheduler_window: 64
+
+eval:
+  enabled: true
+  loader: sanity_eval
+  shard_windows: 64

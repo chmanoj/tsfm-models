@@ -10,9 +10,41 @@ dependencies = [
     "omegaconf>=2.3",
 ]
 
+[project.optional-dependencies]
+# Real GIFT-Eval data access (O1, G2/G3.1) — heavyweight, opt-in. These are
+# lazy-imported only by `data/gifteval_download.py`; the synthetic/sanity path,
+# the model, and CI never need them. Install with:  uv sync --extra gifteval
+# (or  uv pip install -e ".[gifteval]" ). `salesforce_gift_eval` is the official
+# package (it provides the `gift_eval` import); the rest are its runtime needs
+# we hit directly: the HF snapshot fetch, the arrow datasets, gluonts' split +
+# `get_seasonality`, and `.env` resolution of the GIFT_EVAL storage root.
+gifteval = [
+    "salesforce_gift_eval @ git+https://github.com/SalesforceAIResearch/gift-eval.git",
+    "huggingface_hub>=0.20",
+    "datasets>=2.0",
+    "gluonts>=0.16",
+    "python-dotenv>=1.0",
+]
+# Experiment tracking (G1). wandb degrades online->offline->disabled, so it stays
+# opt-in — CI/Mac never depend on it. Install with:  uv sync --extra tracking
+tracking = [
+    "wandb>=0.16",
+]
+
 [dependency-groups]
 dev = [
+    "matplotlib>=3.10.9",
     "pytest>=8",
+]
+
+[tool.uv]
+# salesforce_gift_eval (an 0.0.0a0 alpha) pins several deps tighter than the
+# project uses, but it works fine against the project's versions at runtime —
+# that is the verified env all tests pass on. Override its overly-strict upper
+# bounds so the `gifteval` extra resolves against what we actually run.
+override-dependencies = [
+    "gluonts>=0.16",
+    "matplotlib>=3.10.9",
 ]
 
 [build-system]
@@ -21,6 +53,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tetris"]
+
+[tool.hatch.metadata]
+# the `gifteval` extra references salesforce_gift_eval via a git URL (direct reference)
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
