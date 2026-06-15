@@ -17,7 +17,7 @@ and are stripped before packing (no leakage, no training-path fork).
 
 from __future__ import annotations
 
-from typing import Iterator, NamedTuple, Optional, Protocol, Tuple, runtime_checkable
+from typing import Iterator, List, NamedTuple, Optional, Protocol, Tuple, runtime_checkable
 
 import torch
 
@@ -36,6 +36,7 @@ class EvalItem(NamedTuple):
     naive_denom: Optional[torch.Tensor]    # seasonal-naive denominator; deferred (O4) -> None in v1
     config_id: str                         # which of the 97 GIFT-Eval configs
     season_length: Optional[int] = None    # dataset-provided seasonality m for MASE (O4); None -> unknown
+    channel_seasons: Optional[List[int]] = None  # per-channel m (multi-freq sanity); falls back to season_length
 
 
 def to_train_item(e: EvalItem) -> Item:

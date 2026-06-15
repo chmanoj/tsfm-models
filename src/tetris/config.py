@@ -80,7 +80,10 @@ class DataCfg:
     season_lengths: List[int] = field(default_factory=lambda: [24])
     horizon: int = 32
     series_len: int = 512
-    n_channels: int = 4                  # C for multivariate sanity cases
+    n_channels: int = 4                  # C for multivariate sanity cases (fixed)
+    # If non-empty [lo, hi], draw C per sample (varies channel count across samples,
+    # for the multivariate cases); empty -> fixed n_channels.
+    channels_distribution: List[int] = field(default_factory=list)
     # Download root for the real GIFT-Eval tree (lazy; threaded to the eval loader).
     local_dir: str = ""
 

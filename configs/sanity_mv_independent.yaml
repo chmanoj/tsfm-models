@@ -1,0 +1,40 @@
+# Sanity stage — multivariate_independent: C independent sines sharing season m.
+# Checks variate-id keeps channels separate (no cross-channel signal to exploit).
+# Same tiny model as the sine case; only the data case + channel count change.
+
+run:
+  name: sanity_mv_independent
+  steps: 1500
+  seed: 0
+
+backend:
+  device: auto
+  compile: false
+
+model:
+  d_model: 64
+  n_layers: 3
+  n_heads: 4
+  out_patch: 8
+
+data:
+  loader: sanity
+  case: multivariate_independent
+  season_lengths: [12, 24, 48]   # each channel draws its own frequency per sample
+  channels_distribution: [2, 6]  # channel count also varies per sample
+  horizon: 32
+  series_len: 512
+  n_series: 64
+  n_channels: 4
+
+packing:
+  L_pack: 256
+  buffers_per_step: 4
+  reservoir: true
+  reservoir_k: 64
+  scheduler_window: 64
+
+eval:
+  enabled: true
+  loader: sanity_eval
+  shard_windows: 64

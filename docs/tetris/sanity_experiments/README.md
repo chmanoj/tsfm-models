@@ -17,10 +17,20 @@ and to *beat* it where there's learnable structure under the noise.
 | Case | Model (d/L/H, params) | Device | Steps | Time | model MASE | snaive MASE | skill | Verdict |
 |---|---|---|---|---|---|---|---|---|
 | [sine_univariate](#sine_univariate) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 1500 | 1m47s | **0.812** | 0.981 | **0.83** | ✅ beats naive |
-| multivariate_independent | — | — | — | — | — | — | — | pending |
+| [multivariate_independent](#multivariate_independent) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 6000 | 6m31s | **0.895** | 0.994 | **0.90** | ✅ beats naive |
 | shared_factor | — | — | — | — | — | — | — | pending |
 | features_target (+KFF) | — | — | — | — | — | — | — | pending |
 | all cases mixed | — | — | — | — | — | — | — | pending |
+
+## Planned (v2) — frequency stress test
+
+Once we're comfortable the model learns each case, the **final all-cases run** gets
+a *second version* with a **much larger frequency pool** (at least a few hundred
+distinct periods, ~continuous, instead of the current small `season_lengths` of
+3–4). With only a handful of periods the model can shortcut to "classify which of N
+known seasons and pick it", rather than genuinely *inferring* an arbitrary period
+from context. The large pool applies across **all** cases (independent, shared
+factor, features→target). Not done yet — tracked here so we do it for v2.
 
 ## How to reproduce
 
@@ -66,3 +76,36 @@ baseline (0.98) — the model learns the periodic structure and extrapolates it
 through the held-out horizon. 1500 steps in 1m47s (~72 ms/step).
 
 ![sine_univariate](plots/sine_univariate.png)
+
+---
+
+## multivariate_independent
+
+`C` independent sines (no cross-channel signal). Harder than the sine case in two
+deliberate ways: **each channel draws its own frequency per sample** (from
+`season_lengths=[12,24,48]`) and **the channel count varies per sample**
+(`channels_distribution=[2,6]`). The model must infer each channel's period
+independently via its variate id; seasonal-naive is scored per channel with that
+channel's true period.
+
+```bash
+uv run python -m tetris.train.sanity_run configs/sanity_mv_independent.yaml --steps 6000 --eval-every 1000
+```
+
+Same model (2.06M params), CPU. 64 series, 2–6 target channels each (262 channel
+scores), horizon 32.
+
+| step | train_loss | model MASE | skill |
+|---|---|---|---|
+| 0 (random) | — | 7.060 | 7.11 |
+| 1000 | 0.374 | 1.282 | 1.29 |
+| 2000 | 0.298 | 1.068 | 1.07 |
+| 3000 | 0.290 | 0.986 | 0.99 |
+| 4000 | 0.264 | 0.918 | 0.92 |
+| 6000 | 0.264 | **0.895** | **0.90** |
+
+Crosses below seasonal naive at ~3000 steps and settles at 0.895. The model learns
+distinct per-channel frequencies under a varying channel count — variate-id keeps
+the channels separate. 6000 steps in 6m31s (~65 ms/step).
+
+![multivariate_independent](plots/multivariate_independent.png)

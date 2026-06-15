@@ -46,25 +46,35 @@ def _sine(rng, n: int, m: int, noise_frac: float) -> np.ndarray:
     return signal + rng.normal(0.0, noise_frac * amp, n)
 
 
-def gen_sine_univariate(rng, n: int, m: int, C: int, noise_frac: float):
-    return _sine(rng, n, m, noise_frac)[None, :], 0, 1
+def _draw_period(rng, pool) -> int:
+    return int(rng.choice(np.asarray(pool)))
 
 
-def gen_multivariate_independent(rng, n: int, m: int, C: int, noise_frac: float):
-    """``C`` independent sines sharing the season length ``m`` but with their own
-    amplitude/phase/offset — no cross-channel signal (checks variate-id keeps
-    channels separate)."""
-    x = np.stack([_sine(rng, n, m, noise_frac) for _ in range(C)])
-    return x, 0, C
+def gen_sine_univariate(rng, n: int, C: int, noise_frac: float, pool):
+    m = _draw_period(rng, pool)
+    return _sine(rng, n, m, noise_frac)[None, :], 0, 1, [m]
 
 
-def gen_shared_factor(rng, n: int, m: int, C: int, noise_frac: float, *, bank: int = 4):
-    """``C`` channels = random linear combos of a shared bank of period-``m`` sine
-    factors + idiosyncratic noise + per-channel scale/offset. Channels correlate
-    through the shared factors (the D4 cross-channel routing signal); the season
-    length stays ``m`` for every channel."""
-    factors = np.stack([_sine(rng, n, m, noise_frac=0.0) for _ in range(bank)])
+def gen_multivariate_independent(rng, n: int, C: int, noise_frac: float, pool):
+    """``C`` independent sines, **each with its own frequency drawn per sample** from
+    the season pool. No cross-channel signal — the model must learn each channel's
+    distinct period via its variate id, and the seasonal-naive baseline is scored
+    per channel with that channel's true period."""
+    seasons = [_draw_period(rng, pool) for _ in range(C)]
+    x = np.stack([_sine(rng, n, seasons[c], noise_frac) for c in range(C)])
+    return x, 0, C, seasons
+
+
+def gen_shared_factor(rng, n: int, C: int, noise_frac: float, pool, *, bank: int = 4):
+    """``C`` channels = random linear combos of a shared bank of sine factors whose
+    **periods are drawn per sample** from the pool + idiosyncratic noise + per-channel
+    scale/offset. Channels correlate through the shared factors (the D4 cross-channel
+    routing signal). Each channel is a mixture, so its declared seasonality is the
+    dominant factor period (the naive reference)."""
+    fper = [_draw_period(rng, pool) for _ in range(bank)]
+    factors = np.stack([_sine(rng, n, fper[k], noise_frac=0.0) for k in range(bank)])
     out = np.empty((C, n), dtype=np.float64)
+    seasons: list[int] = []
     for c in range(C):
         k = int(rng.integers(1, bank + 1))
         sel = rng.choice(bank, size=k, replace=False)
@@ -74,20 +84,24 @@ def gen_shared_factor(rng, n: int, m: int, C: int, noise_frac: float, *, bank: i
         scale = np.exp(rng.uniform(-1.0, 1.0))
         offset = rng.uniform(-10.0, 10.0)
         out[c] = scale * (sig + noise_frac * rng.normal(0.0, 1.0, n)) + offset
-    return out, 0, C
+        # declared season = period of this channel's largest-weight factor
+        seasons.append(int(fper[sel[int(np.argmax(np.abs(w)))]]))
+    return out, 0, C, seasons
 
 
-def gen_features_target(rng, n: int, m: int, C: int, noise_frac: float):
-    """One feature (period-``m`` sine) drives a target that reads it lagged by
+def gen_features_target(rng, n: int, C: int, noise_frac: float, pool):
+    """One feature (period drawn per sample) drives a target that reads it lagged by
     ``k`` steps + small noise. Features-first ``[feature; target]`` (nf=1, nt=1) —
-    a channel-independent baseline cannot capture the lagged edge."""
+    a channel-independent baseline cannot capture the lagged edge. Target inherits
+    the feature's period."""
+    m = _draw_period(rng, pool)
     feature = _sine(rng, n, m, noise_frac)
     lag = int(rng.integers(1, min(m, n // 4) + 1))
     target = np.empty(n, dtype=np.float64)
     target[:lag] = feature[0]
     target[lag:] = feature[:-lag]
     target = target + rng.normal(0.0, noise_frac * feature.std(), n)
-    return np.stack([feature, target]), 1, 1
+    return np.stack([feature, target]), 1, 1, [m, m]
 
 
 _GENERATORS = {
@@ -114,6 +128,7 @@ class SanitySpec:
     series_len: int = 512
     horizon: int = 32
     n_channels: int = 4
+    channels_distribution: Tuple[int, ...] = ()
     n_series: int = 64
     noise_frac: float = 0.1
     seed: int = 0
@@ -126,6 +141,9 @@ class SanitySpec:
         if self.horizon >= self.series_len:
             raise ValueError(f"horizon {self.horizon} must be < series_len {self.series_len}")
         self.season_lengths = tuple(int(m) for m in self.season_lengths)
+        self.channels_distribution = tuple(int(c) for c in self.channels_distribution)
+        if self.channels_distribution and len(self.channels_distribution) != 2:
+            raise ValueError("channels_distribution must be empty or [lo, hi]")
 
     @classmethod
     def from_cfg(cls, cfg) -> "SanitySpec":
@@ -136,21 +154,34 @@ class SanitySpec:
             series_len=d.series_len,
             horizon=d.horizon,
             n_channels=d.n_channels,
+            channels_distribution=tuple(d.channels_distribution),
             n_series=d.n_series,
             seed=cfg.run.seed,
         )
 
-    def season_of(self, idx: int) -> int:
-        return self.season_lengths[idx % len(self.season_lengths)]
+    def channels_of(self, rng) -> int:
+        """Per-sample channel count: drawn from ``channels_distribution`` when set
+        (multivariate cases vary C across samples), else fixed ``n_channels``. The
+        case generator may still override (univariate→1, features_target→2)."""
+        if self.channels_distribution:
+            lo, hi = self.channels_distribution
+            return int(rng.integers(lo, hi + 1))
+        return self.n_channels
 
     def make(self, idx: int):
-        """Raw full series for ``idx`` → ``(data[C, series_len], nf, nt, m)``."""
+        """Raw full series for ``idx`` → ``(data[C, series_len], nf, nt, seasons)``.
+
+        Every channel's frequency is drawn per sample from ``season_lengths`` (so a
+        given channel index does not have a fixed period across samples). ``seasons``
+        is the per-channel period list (length ``C``); the series-level seasonality
+        declared to MASE is ``seasons[nf]`` (the first target channel)."""
         rng = np.random.default_rng((self.seed, idx))
-        m = self.season_of(idx)
-        data, nf, nt = _GENERATORS[self.case](
-            rng, self.series_len, m, self.n_channels, self.noise_frac
+        C = self.channels_of(rng)
+        data, nf, nt, seasons = _GENERATORS[self.case](
+            rng, self.series_len, C, self.noise_frac, self.season_lengths
         )
-        return np.ascontiguousarray(data, dtype=np.float64), int(nf), int(nt), m
+        return (np.ascontiguousarray(data, dtype=np.float64), int(nf), int(nt),
+                [int(s) for s in seasons])
 
     @property
     def context_len(self) -> int:

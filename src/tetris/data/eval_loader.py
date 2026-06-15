@@ -266,7 +266,6 @@ def evaluate_mase(
         if item.season_length is None:
             skipped += 1
             continue
-        m = int(item.season_length)
         nf, nt = item.num_features, item.num_targets
         batch = eval_batch(item, params, p_out=p_out, l_pack=cfg.packing.L_pack).to(device)
         gen = torch.Generator(device=device).manual_seed(basis_seed)
@@ -276,6 +275,8 @@ def evaluate_mase(
         y_true = item.y_true.to(torch.float32)                                # [p, nt]
         context = item.data_tensor                                           # [C, t_ctx]
         for ti in range(nt):
+            # per-channel seasonality (multi-freq sanity); falls back to series m
+            m = int(item.channel_seasons[nf + ti]) if item.channel_seasons else int(item.season_length)
             ctx_c = context[nf + ti]
             denom = seasonal_naive_denom(ctx_c, m)
             yt = y_true[:, ti]

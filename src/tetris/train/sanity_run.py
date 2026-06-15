@@ -117,7 +117,7 @@ def _make_run_dir(cfg: Config) -> Path:
 
 
 def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
-               eval_every: int = 0, device: str = None, n_plot: int = 5) -> dict:
+               eval_every: int = 0, device: str = None, n_plot: int = 3) -> dict:
     cfg = load_config(cfg_path)
     steps = steps or cfg.run.steps
     eval_every = eval_every or max(1, steps // 4)
@@ -149,16 +149,21 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     base = evaluate_mase(model, eval_loader, cfg, device=device)
     log.info("step %5d (random init): %s", 0, _fmt(base))
 
-    eval_log: List[Tuple[int, dict]] = []
+    log_every = max(1, eval_every // 5)
+
+    def _on_log(step, loss):
+        log.info("step %5d: train_loss=%.4f", step, loss)
+
+    def _on_eval(step, r, loss):
+        log.info("step %5d: train_loss=%.4f  %s  [eval]", step, loss, _fmt(r))
+
     t0 = time.perf_counter()
     losses = run_training(
         cfg, steps=steps, lr=lr, device=device, model=model,
-        eval_loader=eval_loader, eval_every=eval_every, eval_log=eval_log,
-        eval_fn=evaluate_mase,
+        eval_loader=eval_loader, eval_every=eval_every,
+        eval_fn=evaluate_mase, log_every=log_every, on_log=_on_log, on_eval=_on_eval,
     )
     elapsed = time.perf_counter() - t0
-    for step, r in eval_log:
-        log.info("step %5d: train_loss=%.4f  %s", step, losses[step - 1], _fmt(r))
     n_done = len(losses)
     rate = n_done / elapsed if elapsed > 0 else float("nan")
     log.info("training complete: %d steps in %s (%.2f steps/s, %.1f ms/step)",
@@ -183,7 +188,7 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--eval-every", type=int, default=0)
     ap.add_argument("--device", default=None)
-    ap.add_argument("--n-plot", type=int, default=5)
+    ap.add_argument("--n-plot", type=int, default=3)
     args = ap.parse_args()
     run_sanity(args.config, steps=args.steps, lr=args.lr, eval_every=args.eval_every,
                device=args.device, n_plot=args.n_plot)

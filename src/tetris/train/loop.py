@@ -38,6 +38,9 @@ def run_training(
     eval_every: int = 0,
     eval_log: Optional[List[Tuple[int, float]]] = None,
     eval_fn=None,
+    log_every: int = 0,
+    on_log=None,
+    on_eval=None,
 ) -> List[float]:
     """Run up to ``steps`` train steps off the reservoir; return per-step loss.
 
@@ -79,6 +82,9 @@ def run_training(
         losses.append(float(lb.total.detach()))
 
         step = len(losses)
+        # Live train-loss heartbeat (fires between evals so long runs log progress).
+        if on_log is not None and log_every > 0 and step % log_every == 0:
+            on_log(step, losses[-1])
         if eval_loader is not None and eval_every > 0 and step % eval_every == 0:
             fn = eval_fn
             if fn is None:
@@ -88,4 +94,6 @@ def run_training(
             tl = fn(forward, eval_loader, cfg, device=device)
             if eval_log is not None:
                 eval_log.append((step, tl))
+            if on_eval is not None:           # live eval logging (not deferred to end)
+                on_eval(step, tl, losses[-1])
     return losses

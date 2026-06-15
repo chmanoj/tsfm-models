@@ -36,7 +36,7 @@ class SanityTrainLoader:
         return cls(SanitySpec.from_cfg(cfg), rank=rank, world_size=world_size)
 
     def _context_item(self, idx: int):
-        data, nf, nt, _m = self.spec.make(idx)
+        data, nf, nt, _seasons = self.spec.make(idx)
         ctx = data[:, : self.spec.context_len]  # hold out the last `horizon` steps
         item = (torch.from_numpy(np.ascontiguousarray(ctx, dtype=np.float32)), nf, nt)
         validate_item(item)
@@ -63,12 +63,15 @@ def make_sanity_eval_shard(cfg) -> List[EvalItem]:
     p = spec.horizon
     items: List[EvalItem] = []
     for idx in range(spec.n_series):
-        data, nf, nt, m = spec.make(idx)
+        data, nf, nt, seasons = spec.make(idx)
+        m = seasons[nf]  # series-level seasonality = first target channel's period
         context = torch.from_numpy(np.ascontiguousarray(data[:, :-p], dtype=np.float32))
         y_true = torch.from_numpy(np.ascontiguousarray(data[nf:, -p:].T, dtype=np.float32))
+        mtag = m if len(set(seasons[nf:])) == 1 else "x".join(str(s) for s in seasons[nf:])
         items.append(EvalItem(
             data_tensor=context, num_features=nf, num_targets=nt,
             y_true=y_true, naive_denom=None,
-            config_id=f"sanity/{spec.case}/m{m}/series_{idx}", season_length=m,
+            config_id=f"sanity/{spec.case}/m{mtag}/series_{idx}",
+            season_length=m, channel_seasons=seasons,
         ))
     return items
