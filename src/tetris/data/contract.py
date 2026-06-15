@@ -103,9 +103,10 @@ def build_eval_loader(cfg, *, local_dir: Optional[str] = None):
 
     name = cfg.eval.loader
     if name == "gifteval_test":
-        if local_dir is None:
-            raise ValueError("gifteval_test needs local_dir (run gifteval_download first)")
-        return GiftEvalEvalLoader.from_download(cfg, local_dir=local_dir)
+        # Resolve the storage root: explicit arg -> cfg.data.local_dir -> $GIFT_EVAL
+        # (from_download falls back to the env var when this is empty).
+        resolved = local_dir or cfg.data.local_dir or ""
+        return GiftEvalEvalLoader.from_download(cfg, local_dir=resolved)
     if name == "synthetic_eval":
         return GiftEvalEvalLoader.from_synthetic(cfg, n_items=cfg.eval.shard_windows, seed=cfg.run.seed)
     if name == "sanity_eval":

@@ -39,13 +39,21 @@ def seasonal_naive_forecast(context: torch.Tensor, m: int, p: int) -> torch.Tens
 
 def seasonal_naive_denom(context: torch.Tensor, m: int) -> torch.Tensor:
     """In-sample seasonal-naive denominator for MASE: ``mean_t |y_t - y_{t-m}|``
-    over the context (1-D, raw), floored to avoid divide-by-zero."""
+    over the context (1-D, raw), floored to avoid divide-by-zero.
+
+    **Data** NaNs in the context are masked out (mean over the finite seasonal
+    diffs), mirroring gluonts' ``Evaluator`` (``np.ma.masked_invalid(past_data)``)
+    so missing observations in the ``*_with_missing`` configs don't NaN the denom.
+    Model output is never involved here, so this never hides a model failure."""
     context = context.reshape(-1).to(torch.float32)
     m = max(1, int(m))
     if context.numel() <= m:
         return torch.tensor(_DENOM_FLOOR)
-    diff = (context[m:] - context[:-m]).abs().mean()
-    return diff.clamp_min(_DENOM_FLOOR)
+    diff = (context[m:] - context[:-m]).abs()
+    finite = diff[torch.isfinite(diff)]
+    if finite.numel() == 0:
+        return torch.tensor(_DENOM_FLOOR)
+    return finite.mean().clamp_min(_DENOM_FLOOR)
 
 
 def mase(y_true: torch.Tensor, y_pred: torch.Tensor, denom: torch.Tensor) -> float:

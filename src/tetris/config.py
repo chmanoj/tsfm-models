@@ -130,7 +130,13 @@ class LossCfg:
 class EvalCfg:
     enabled: bool = True
     loader: str = "gifteval_test"
-    shard_windows: int = 100  # "first 100 windows per config" (record-only)
+    shard_windows: int = 100  # global window cap for the record-only synthetic/sanity scorers
+    # Per-config item cap for the real GIFT-Eval leaderboard (G2): the deterministic
+    # first-N test windows *per config* (and train series per config for iter_train_items).
+    # Default 10 (fast dev eval); -1 -> all items (full, slow). Maintainer's G2 choice
+    # (deviates from the prompt's default 100). Distinct from shard_windows, which is the
+    # global cap used by evaluate_test_loss / evaluate_mase on the synthetic/sanity shards.
+    items_per_config: int = 10
 
 
 @dataclass
@@ -194,6 +200,10 @@ class Config:
             raise ValueError(f"unknown norm.loss_target={self.norm.loss_target!r}")
         if self.norm.loss_space not in ("arcsinh", "vol_units"):
             raise ValueError(f"unknown norm.loss_space={self.norm.loss_space!r}")
+        if self.eval.items_per_config != -1 and self.eval.items_per_config < 1:
+            raise ValueError(
+                f"eval.items_per_config must be -1 (all) or >= 1; got {self.eval.items_per_config}"
+            )
         if self.tracking.backend not in ("wandb", "none"):
             raise ValueError(f"unknown tracking.backend={self.tracking.backend!r}")
         if self.tracking.mode not in ("auto", "online", "offline", "disabled"):

@@ -289,6 +289,90 @@ vectors across layouts (training resamples freely). All four pre-training gates
   `steps_per_sec`; tracker wired into the sanity entrypoint only, not
   `distributed.run_training`.
 
+**GIFT-Eval G2 reconciliation (real data + leaderboard metric — pinned, do not re-flag):**
+- **The S12 `gift_eval` API guess was wrong; re-verified against the installed package.**
+  `gift_eval.data.Dataset(name, term, to_univariate, storage_env_var="GIFT_EVAL")` reads
+  the storage root from the **`GIFT_EVAL` env var** — there is **no `storage_path` kwarg**
+  (the S12 call `Dataset(..., storage_path=local_dir)` would have `TypeError`d). Fixed:
+  `gifteval_download._make_dataset` sets `os.environ["GIFT_EVAL"]=local_dir` then constructs
+  `Dataset(name, term)`. `term` is the `short|medium|long` enum (horizon ×1/10/15). Verified
+  members: `.test_data.{input,label}` (gluonts `TestData`; per-window context/label entries
+  with channel-major `["target"]`), `.training_dataset` (gluonts series before the test/val
+  windows), `.prediction_length`, `.windows`, `.freq`. Installed for verification with
+  `uv pip install --no-deps git+…/gift-eval` + `gluonts` (strict pins won't build on 3.13;
+  `--no-deps` is fine since we only read the API; full deps live on WSL).
+- **Seasonality has a single canonical, non-silent source.** `gift_eval` does **not** carry
+  per-config seasonality; GIFT-Eval's own scoring derives it from the frequency via gluonts'
+  `get_seasonality(freq)` (H→24, M→12, D→1, W→1, T→1440, Q→4, B→5; default-1 for unknown,
+  gluonts' own warning surfaced verbatim). `gifteval_download._season_length` wraps exactly
+  that and wires it to `EvalItem.season_length`. **No silent fallback of our own** (maintainer
+  mandate) — multivariate configs share one freq so all channels get that season.
+- **Train-split reader added (no factory key yet).** `iter_train_items(local_dir, configs,
+  term, max_series_per_config, to_univariate, rank, world_size)` yields the frozen training
+  `Item` 3-tuple from `Dataset.training_dataset` series (features-first `nf=0`, NaNs kept),
+  round-robin sharded over the flattened `(config, series)` stream by `(rank, world_size)`
+  (§9). **Deliberately not wired into `build_loader`** — the test-as-training loader is G3,
+  train-split *training* is G5 (mutual exclusivity).
+- **Leaderboard MASE = geometric mean across configs (+ per-config breakdown).**
+  `eval_loader.evaluate_leaderboard` groups items by `EvalItem.config_id`, geo-means the
+  per-channel-item MASEs **within** each config to one number, then geo-means those per-config
+  MASEs (every config weighs equally, not every window — the GIFT-Eval convention; confirmed
+  with the maintainer; CRPS out of scope, point forecast only). It reuses the exact per-item
+  machinery of `evaluate_mase` via the new shared `_score_item` helper (`horizon_forecast_raw`
+  → raw space → `metrics.mase` with the dataset season; compile-safe dynamic-mark + hoisted
+  block mask). Returns `{leaderboard_mase, snaive_mase, skill, n_configs, n_configs_in_gmean,
+  n_configs_finite, skipped, per_config}`. `evaluate_mase` is unchanged in behaviour (still the
+  flat single-shard scorer for the synthetic/sanity mid-train eval; both now share `_score_item`).
+- **NaN posture (maintainer mandate): model NaN poisons, data NaN is masked like gluonts.**
+  The two NaN sources are handled **differently on purpose**. (1) **Data** NaNs — missing
+  observations in the `*_with_missing` configs — are masked exactly as gluonts' `Evaluator` does
+  (`np.ma.masked_invalid` on the **label** and **past_data**): `_score_item` masks the horizon on
+  `isfinite(y_true)` only, and `metrics.seasonal_naive_denom` averages over the **finite** seasonal
+  diffs (floored, never NaN). (2) **Model** output is **never** masked — the forecast flows into
+  `mase` as-is, so a model NaN/inf propagates → MASE non-finite → poisons the per-config and
+  leaderboard geo-mean. `_gmean` deliberately does **not** drop non-finite (only empty→NaN), so
+  model breakage is **visible**, not hidden (our guard; the model should never emit NaN). A config
+  leaves the cross-config geo-mean **only** when it has zero scorable channel-items (a pure data
+  reason), never because the model poisoned it. **Observed at random init on the WSL subset:**
+  `leaderboard_mase=inf` (the untrained head overflows `sinh(·)`), all 6 configs scored, snaive
+  baseline finite (geo-mean ≈1.9) — i.e. the guard fires as intended; G3's training must bring the
+  model output finite for a meaningful number.
+- **Eval cap is per-config and configurable (default 10, -1=all).** New `EvalCfg.
+  items_per_config` (validated `-1` or `≥1`) — the maintainer chose **10** for fast dev eval
+  (deviates from the prompt's default 100) with **`-1` → all items**. It caps the real test
+  windows per config in `iter_eval_items`, the train series per config in `iter_train_items`,
+  and the per-config items scored in `evaluate_leaderboard`. The legacy `EvalCfg.shard_windows`
+  (default 100) is a **distinct** knob: the *global* cap still used by `evaluate_test_loss`/
+  `evaluate_mase` over the synthetic/sanity shards (config-ids are unique there, so per-config
+  grouping is meaningless).
+- **Storage roots come from env vars (maintainer's layout).** `TEST_ENV_VAR="GIFT_EVAL"`
+  (the package's own var — one export wires both us and `gift_eval`) → `~/Projects/gifteval/
+  test`; `PRETRAIN_ENV_VAR="GIFT_EVAL_PRETRAIN"` → `~/Projects/gifteval/pretrain` (reserved
+  for G5). Resolution order for the eval loader: explicit arg → `cfg.data.local_dir` →
+  `$GIFT_EVAL` (auto-loaded from the repo-root **`.env`** if not already exported — the same
+  `python-dotenv` mechanism `gift_eval` itself uses, so a single `GIFT_EVAL=…` line in `.env`
+  wires both us and the package); a missing root raises a clear `ValueError` (dep-free, before any
+  lazy import). `_list_configs` walks the tree for `dataset_info.json` leaves (robust to variable
+  nesting), returning names relative to the root (e.g. `electricity/15T`); `config_id =
+  "{name}/{term}"`.
+- **Tests stay CI-safe (same posture as `test_eval_loss`).** `tests/test_leaderboard.py`:
+  the geo-mean aggregator + per-config cap (incl. `-1`) + season-skip are exercised **offline**
+  on a hand-built multi-config `EvalItem` shard with a tiny real model; the storage-root guard
+  is dep-free; the real download/iterators + the get_seasonality values **skip when the deps/
+  data are absent**, so CI never touches the network. `uv run pytest` → **115 passed, 1
+  skipped** (was 105; +10 `test_leaderboard`, the real-tree smoke skipped) — incl. explicit
+  model-NaN-poisons-vs-data-NaN-masked tests.
+- **Verified end-to-end on the WSL box (deliverable met).** Installed the extras there
+  (`huggingface_hub datasets gluonts python-dotenv` + `gift_eval --no-deps`), set
+  `GIFT_EVAL=~/Projects/gifteval/test` in `.env`, and ran our own `download_gifteval` for a small
+  subset (`covid_deaths, hospital, m4_yearly, us_births/{D,M,W}` → 6 configs, 4.7 MB). Confirmed:
+  `iter_eval_items` yields correct `EvalItem`s (context `[C,t]`, `y_true [p,nt]`, `season_length`
+  from `get_seasonality`), `iter_train_items` yields valid frozen `Item`s, and
+  `evaluate_leaderboard` runs (geo-mean + per-config; random-init guard = `inf` as above).
+- **Not done in G2 (by scope):** no *training* run (G3); covariates (`past_feat_dynamic_real`)
+  are ignored (`nf=0`, target-only) — KFF over real covariates is future work; only a 6-config
+  dev subset is downloaded (full 97 is a larger fetch, done when needed).
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).
