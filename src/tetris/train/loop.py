@@ -12,6 +12,7 @@ checkpoint re-shard are S13.
 
 from __future__ import annotations
 
+import time
 from typing import List, Optional, Tuple
 
 import torch
@@ -20,6 +21,7 @@ from ..config import Config
 from ..model.tetris import Tetris
 from ..packing.reservoir import StreamingReservoir, packed_batches
 from .step import make_basis, mark_dynamic_batch, train_step
+from .tracking import NullTracker, Tracker, eval_scalars
 
 
 def run_training(
@@ -41,6 +43,7 @@ def run_training(
     log_every: int = 0,
     on_log=None,
     on_eval=None,
+    tracker: Optional[Tracker] = None,
 ) -> List[float]:
     """Run up to ``steps`` train steps off the reservoir; return per-step loss.
 
@@ -52,7 +55,13 @@ def run_training(
     ``eval_loader`` is given, the GIFT-Eval test loss is computed every
     ``eval_every`` steps via the *shared* collator (context-only) and appended to
     ``eval_log`` as ``(step, loss)`` — it never feeds the optimizer.
+
+    ``tracker`` (G1): an optional experiment tracker (default :class:`NullTracker`);
+    train_loss/lr/throughput are logged each ``log_every`` and the eval result each
+    ``eval_every`` — a no-op sink unless the caller wires a backend.
     """
+    if tracker is None:
+        tracker = NullTracker()
     if model is None:
         model = Tetris(cfg).to(device)
     if forward is None:
@@ -69,6 +78,7 @@ def run_training(
     )
 
     losses: List[float] = []
+    t0 = time.perf_counter()
     for batch in batches:
         if len(losses) >= steps:
             break
@@ -83,8 +93,12 @@ def run_training(
 
         step = len(losses)
         # Live train-loss heartbeat (fires between evals so long runs log progress).
-        if on_log is not None and log_every > 0 and step % log_every == 0:
-            on_log(step, losses[-1])
+        if log_every > 0 and step % log_every == 0:
+            if on_log is not None:
+                on_log(step, losses[-1])
+            rate = step / max(1e-9, time.perf_counter() - t0)
+            tracker.log_scalars(
+                {"train_loss": losses[-1], "lr": lr, "steps_per_sec": rate}, step=step)
         if eval_loader is not None and eval_every > 0 and step % eval_every == 0:
             fn = eval_fn
             if fn is None:
@@ -96,4 +110,5 @@ def run_training(
                 eval_log.append((step, tl))
             if on_eval is not None:           # live eval logging (not deferred to end)
                 on_eval(step, tl, losses[-1])
+            tracker.log_scalars(eval_scalars(tl), step=step)
     return losses

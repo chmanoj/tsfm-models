@@ -134,6 +134,18 @@ class EvalCfg:
 
 
 @dataclass
+class TrackingCfg:
+    # Experiment-tracker seam (G1). Default backend is wandb with graceful
+    # degradation: online -> offline (no account/network) -> disabled (no-op) when
+    # `wandb` isn't installed, so CI + Mac dev never depend on it. `none` forces off.
+    backend: str = "wandb"          # wandb | none
+    project: str = "tetris"
+    # auto -> online iff logged-in AND wandb host reachable, else offline. Explicit
+    # online|offline|disabled pass through; the WANDB_MODE env var overrides all.
+    mode: str = "auto"              # auto | online | offline | disabled
+
+
+@dataclass
 class ChecksCfg:
     assert_no_recompile: bool = True
     assert_pack_invariance: bool = True
@@ -151,6 +163,7 @@ class Config:
     norm: NormCfg = field(default_factory=NormCfg)
     loss: LossCfg = field(default_factory=LossCfg)
     eval: EvalCfg = field(default_factory=EvalCfg)
+    tracking: TrackingCfg = field(default_factory=TrackingCfg)
     checks: ChecksCfg = field(default_factory=ChecksCfg)
 
     def __post_init__(self) -> None:
@@ -181,6 +194,10 @@ class Config:
             raise ValueError(f"unknown norm.loss_target={self.norm.loss_target!r}")
         if self.norm.loss_space not in ("arcsinh", "vol_units"):
             raise ValueError(f"unknown norm.loss_space={self.norm.loss_space!r}")
+        if self.tracking.backend not in ("wandb", "none"):
+            raise ValueError(f"unknown tracking.backend={self.tracking.backend!r}")
+        if self.tracking.mode not in ("auto", "online", "offline", "disabled"):
+            raise ValueError(f"unknown tracking.mode={self.tracking.mode!r}")
 
 
 def resolved_encoder_cap(cfg: "Config") -> int:

@@ -40,7 +40,7 @@ from ..packing.collator import Batch, pack
 from ..tokenize.assemble import assemble
 from ..tokenize.spec import SegmentSpec
 from ..tokenize.window_sampler import SamplerParams
-from ..train.step import make_basis
+from ..train.step import make_basis, make_block_mask, mark_dynamic_batch
 from . import synthetic as S
 from .contract import EvalItem, to_train_item, validate_item
 
@@ -202,7 +202,11 @@ def evaluate_test_loss(
                            l_pack=cfg.packing.L_pack).to(device)
         gen = torch.Generator(device=device).manual_seed(basis_seed)
         basis = make_basis(batch, cfg.model.d_model, device=device, generator=gen)
-        out = forward(batch, variate_basis=basis)
+        # Under torch.compile, mark the only per-item-varying dims (R/n_var) dynamic
+        # and hoist the block mask — exactly like the train step — so the B=1 eval
+        # reuses ONE graph instead of recompiling per item (D14; G1 GPU-note #1).
+        mark_dynamic_batch(batch, basis)
+        out = forward(batch, variate_basis=basis, block_mask=make_block_mask(batch))
         total += horizon_test_loss(out, batch)
         count += 1
     return total / count if count else float("nan")
@@ -281,7 +285,10 @@ def evaluate_mase(
         batch = eval_batch(item, params, p_out=p_out, l_pack=cfg.packing.L_pack).to(device)
         gen = torch.Generator(device=device).manual_seed(basis_seed)
         basis = make_basis(batch, cfg.model.d_model, device=device, generator=gen)
-        out = forward(batch, variate_basis=basis)
+        # See evaluate_test_loss: dynamic-mark R/n_var + hoist the block mask so the
+        # compiled mid-train eval reuses one B=1 graph (D14; G1 GPU-note #1).
+        mark_dynamic_batch(batch, basis)
+        out = forward(batch, variate_basis=basis, block_mask=make_block_mask(batch))
         forecast = horizon_forecast_raw(out, batch, item, p_out=p_out).cpu()  # [p, nt]
         y_true = item.y_true.to(torch.float32)                                # [p, nt]
         context = item.data_tensor                                           # [C, t_ctx]

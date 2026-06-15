@@ -242,6 +242,53 @@ vectors across layouts (training resamples freely). All four pre-training gates
   beating seasonal naive (0.98) — the architecture learns. `test_sanity_mase`
   (offline, CI-safe) guards the MASE math + the learns-a-sine smoke.
 
+**GIFT-Eval G1 reconciliation (observability — pinned, do not re-flag):**
+- **Mid-train eval MASE now logs under `--compile` (GPU-note #1 fixed).** The eager
+  B=1 eval used to recompile per item, so `sanity_run` skipped the mid-train hook
+  under compile. Fix mirrors the train step inside `evaluate_mase`/`evaluate_test_loss`:
+  `mark_dynamic_batch(batch, basis)` marks the only per-item-varying dims (`R`/`n_var`)
+  dynamic, and the FlexAttention `BlockMask` is built **eagerly** via
+  `make_block_mask(batch)` and passed into the forward (it can't be lowered inside
+  `torch.compile` — same hoist as `train_step`). The mid-train hook in `sanity_run`
+  is re-enabled unconditionally (`loop_eval = eval_loader`, `eval_every` honored under
+  compile). **Verified on the WSL RTX 3070** (sine, 60 steps): periodic eval MASE logs
+  at every `eval_every`; **exactly 1** recompile event total (the train→`no_grad`
+  `grad_mode` flip, not per-item); compiled and eager-on-CUDA numbers are **identical**
+  (init 6.7274; step40 4.6076; step60/FINAL 3.1098). No frozen seam touched.
+- **Experiment-tracker seam (new `train/tracking.py`), optional + offline-friendly.**
+  A backend-agnostic `Tracker` protocol (`log_config` / `log_scalars(*, step)` /
+  `finish`) with `NullTracker` (no-op) and `WandbTracker`. `make_tracker(cfg, …)`
+  **never raises** — a tracker problem degrades to `NullTracker` and logs why, so CI +
+  Mac dev never depend on it. **Default backend = wandb** (maintainer's choice) with a
+  graceful chain: `auto` mode resolves to **online** iff a wandb API key is discoverable
+  (`WANDB_API_KEY`/`~/.netrc`) **and** `api.wandb.ai:443` is reachable (3 s TCP probe),
+  else **offline** (local `wandb/` dir, no account, sync later); if `wandb` isn't
+  importable at all → **disabled** no-op with a logged warning. `WANDB_MODE` env
+  overrides. `cfg.tracking.backend == "none"` forces off. `TrackingCfg{backend, project,
+  mode}` added to `Config` (additive; validated in `__post_init__`).
+- **Wiring.** `run_training` gained an optional `tracker` param (defaults to
+  `NullTracker`); it logs `{train_loss, lr, steps_per_sec}` each `log_every` and the
+  flattened eval result (`eval/…`, NaNs dropped) each `eval_every`. `sanity_run` builds
+  the tracker, logs the resolved config + base/final eval, and `finish()`es. wandb is
+  **session-installed, not in `pyproject`** (lazy-dep convention, like the GIFT-Eval
+  deps). `test_tracking` (13 tests, no wandb needed — fake-module + `sys.modules` tricks)
+  guards the seam; `_tiny_cfg` sets `tracking.backend=none` so existing tests never touch
+  wandb.
+- **Credentials via `.env` (zero-dep loader).** `tracking._load_dotenv()` parses a
+  repo-root `.env` (`KEY=VALUE`, quotes stripped) into the environment **without
+  overriding** already-set vars, so `WANDB_API_KEY` is discoverable for `auto`→online +
+  `wandb.init`. `.env` is **gitignored** (never committed). **To track GPU runs online
+  on WSL you must put `.env` on the box too** — the rsync ship command does **not**
+  exclude `.env`, so a normal `rsync` includes it (or `scp .env wsl-gpu:~/tsfm-models/`).
+- **All three tracker paths live-verified.** **offline** (local run dir) ✓; **disabled**
+  (wandb absent on WSL → logged no-op) ✓; **online** ✓ — a real run synced to project
+  **`chmanoj/tetris`** (auto-created on first `init`) and confirmed via the wandb **API**
+  (`api.runs("chmanoj/tetris")` → run `finished`, all 8 scalars in the summary, config
+  logged).
+- **Still open (deferred past G1):** throughput counts compile warmup in the cumulative
+  `steps_per_sec`; tracker wired into the sanity entrypoint only, not
+  `distributed.run_training`.
+
 **Decided session conventions** (from clarifying Q&A):
 
 - **Compute / backends:** a backend switch. FlexAttention + `torch.compile` is the CUDA path (the real D14 target); SDPA + materialized bool mask + eager is the Mac (MPS/CPU) path for local unit tests and a reduced shakedown. The two paths must produce numerically equal masking/attention on the same inputs (tested).

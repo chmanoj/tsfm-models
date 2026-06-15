@@ -30,6 +30,7 @@ def _tiny_cfg(tmp_path, **data):
     cfg.packing.scheduler_window = 16
     cfg.data.n_series = 8
     cfg.eval.shard_windows = 8
+    cfg.tracking.backend = "none"   # offline/CI: never touch wandb in tests
     for k, v in data.items():
         setattr(cfg.data, k, v)
     return cfg

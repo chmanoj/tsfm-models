@@ -33,6 +33,7 @@ from ..data.eval_loader import evaluate_mase
 from ..model.tetris import Tetris
 from .loop import run_training
 from .sanity_plot import plot_eval_samples
+from .tracking import eval_scalars, make_tracker
 
 OUTPUTS_ROOT = Path("outputs")
 log = logging.getLogger("tetris.sanity")
@@ -140,6 +141,13 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     eval_loader = build_eval_loader(cfg, local_dir=cfg.data.local_dir or None)
     total, trainable = _count_params(model)
 
+    # Experiment tracker (G1): default wandb online->offline->disabled (no-op).
+    # Logs the resolved config + scalars; never a hard dependency (CI/Mac safe).
+    tracker = make_tracker(
+        cfg, run_name=run_dir.name, run_dir=run_dir,
+        config=OmegaConf.to_container(OmegaConf.structured(cfg), resolve=True),
+    )
+
     # Real CUDA path (D14): FlexAttention + torch.compile. Compile only the
     # *training* forward (one graph after warmup; R/n_var marked dynamic by the
     # step). Eval/plot stay eager (B=1, per-item shapes) — same params, used as the
@@ -161,6 +169,7 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     _log_loader_sizes(build_loader(cfg), eval_loader, cfg)
     base = evaluate_mase(model, eval_loader, cfg, device=device)
     log.info("step %5d (random init): %s", 0, _fmt(base))
+    tracker.log_scalars(eval_scalars(base), step=0)
 
     log_every = max(1, eval_every // 5)
 
@@ -170,13 +179,14 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     def _on_eval(step, r, loss):
         log.info("step %5d/%d: train_loss=%.4f  %s  [eval]", step, steps, loss, _fmt(r))
 
-    # Mid-train eval uses the training forward; when compiled, the eager B=1 eval
-    # would recompile per item, so skip it under compile (base/final eval cover it).
-    loop_eval = None if compiled else eval_loader
+    # Mid-train eval uses the training forward, compiled or not: evaluate_mase marks
+    # R/n_var dynamic and hoists the block mask (like the train step), so under
+    # --compile the B=1 eval reuses one graph instead of recompiling per item — so
+    # the periodic eval MASE now logs on the GPU too (G1 GPU-note #1 fix).
     t0 = time.perf_counter()
     losses = run_training(
         cfg, steps=steps, lr=lr, device=device, model=model, forward=forward_train,
-        eval_loader=loop_eval, eval_every=(0 if compiled else eval_every),
+        eval_loader=eval_loader, eval_every=eval_every, tracker=tracker,
         eval_fn=evaluate_mase, log_every=log_every, on_log=_on_log, on_eval=_on_eval,
     )
     elapsed = time.perf_counter() - t0
@@ -188,6 +198,7 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     final = evaluate_mase(model, eval_loader, cfg, device=device)
     log.info("FINAL: %s  => %s seasonal naive", _fmt(final),
              "BEATS" if final["skill"] < 1 else "does NOT beat")
+    tracker.log_scalars(eval_scalars(final), step=steps)
 
     # KFF counterfactual: re-eval the SAME model with the feature future toggled,
     # to show known-future covariates are actually needed (D11). Only when the case
@@ -210,6 +221,7 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
         n=n_plot, seed=cfg.run.seed, device=device,
     )
     log.info("wrote plots -> %s", plot_path)
+    tracker.finish()
     return final
 
 

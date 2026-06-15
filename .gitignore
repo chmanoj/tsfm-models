@@ -220,3 +220,4 @@ __marimo__/
 
 # TETRIS model run artifacts (configs/logs/plots) — not tracked
 outputs/
+prompts/
