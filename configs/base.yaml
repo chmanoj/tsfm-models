@@ -25,6 +25,7 @@ data:
   dataset_weights: {}     # D13: id -> multiplier (0 removes + renormalizes)
 packing:
   L_pack: 1024            # -> 2048 expansion (D12)
+  max_query_tokens: 512   # per-pass horizon-token budget (G3.1); rollout iterates for longer
   buffers_per_step: 8
   reservoir: true
 norm:

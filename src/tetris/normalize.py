@@ -194,6 +194,17 @@ def invert(z: torch.Tensor, a: torch.Tensor, sigma: torch.Tensor) -> torch.Tenso
     return torch.sinh(z) * sigma + a
 
 
+# Safety clamp for the arcsinh→raw inversion at the *forecast/metric* boundary
+# (G3.1). `sinh` grows exponentially, so an unbounded arcsinh-space prediction
+# overflows to ±inf (sinh(89) > float32 max), poisoning MASE and, in rollout,
+# cascading NaN. Clamping the prediction to ±10 keeps the exponential bounded in
+# *every* common precision — sinh(10) ≈ 11013 < fp16 max (65504) < bf16/fp32 max —
+# while never clipping a legitimate prediction: real arcsinh-space outputs live
+# around 0–7 (arcsinh of hundreds of σ), and ±10 corresponds to ~11000·σ. This is
+# applied only at the denorm boundary; the math primitives above stay exact.
+ARCSINH_INV_CLAMP = 10.0
+
+
 # --- Locally re-anchored loss targets (D10/D6) ------------------------------
 
 def horizon_target(y: torch.Tensor, a: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:

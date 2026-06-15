@@ -34,12 +34,15 @@ canonical, non-silent source we wire into ``EvalItem.season_length``.
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Sequence
 
 import torch
 
 from .contract import Item, EvalItem, validate_item
+
+log = logging.getLogger("tetris.gifteval")
 
 GIFTEVAL_REPO = "Salesforce/GiftEval"  # HF dataset repo id (verified, O1)
 
@@ -140,42 +143,66 @@ def iter_eval_items(
     local_dir: str = "",
     *,
     configs: Optional[List[str]] = None,
-    term: str = "short",
+    terms: Sequence[str] = ("short",),
     items_per_config: int = 10,
     to_univariate: bool = False,
 ) -> Iterator[EvalItem]:
     """Yield :class:`EvalItem`\\ s from a downloaded GIFT-Eval tree (lazy import).
 
-    The deterministic **first ``items_per_config`` test windows per config** (D13;
-    ``-1`` -> all), each split into a context-only ``data_tensor`` and the held-out
-    ``y_true`` horizon. ``season_length`` is set from the dataset frequency via
-    GIFT-Eval's own ``get_seasonality`` so MASE is correct; ``config_id`` is
-    ``"{name}/{term}"`` so the leaderboard distinguishes terms. Network-free given a
-    populated ``local_dir`` (or ``$GIFT_EVAL``), but depends on the optional
+    The deterministic **first ``items_per_config`` test windows per (config, term)**
+    (D13; ``-1`` -> all), each split into a context-only ``data_tensor`` and the
+    held-out ``y_true`` horizon. ``season_length`` is set from the dataset frequency
+    via GIFT-Eval's own ``get_seasonality`` so MASE is correct; ``config_id`` is
+    ``"{name}/{term}"`` so the leaderboard distinguishes terms.
+
+    **All ``terms`` are attempted on every config** (the leaderboard spans terms). A
+    ``(config, term)`` whose series are too short for the ×10/×15 horizon — a gluonts
+    split error or simply zero test windows — is **skipped with a warning**, never
+    fabricated (G3 maintainer choice: no hardcoded applicability list). Network-free
+    given a populated ``local_dir`` (or ``$GIFT_EVAL``), but depends on the optional
     ``gift_eval``/``gluonts`` packages + real arrow data, so it is not run in CI.
     """
     local_dir = _resolve_local_dir(local_dir)
     names = configs if configs is not None else _list_configs(local_dir)
     cap = _cap(items_per_config)
     for name in names:  # pragma: no cover - requires real data
+        for term in terms:
+            yield from _iter_one_config_term(
+                name, term, local_dir, cap=cap, to_univariate=to_univariate)
+
+
+def _iter_one_config_term(
+    name: str, term: str, local_dir: str, *, cap: int, to_univariate: bool
+) -> Iterator[EvalItem]:  # pragma: no cover - requires real data
+    """First-``cap`` test windows of one ``(name, term)`` as :class:`EvalItem`\\ s.
+
+    Materializes the windowed split inside a guard so a non-applicable term (too-short
+    series → gluonts raises, or no windows) is skipped, not fatal."""
+    config_id = f"{name}/{term}"
+    try:
         ds = _make_dataset(name, term, local_dir, to_univariate=to_univariate)
         season = _season_length(ds.freq)
-        config_id = f"{name}/{term}"
-        for window_i, (ctx, future) in enumerate(zip(ds.test_data.input, ds.test_data.label)):
-            if window_i >= cap:
-                break
-            context = torch.as_tensor(_target_2d(ctx["target"]), dtype=torch.float32)
-            y_true = torch.as_tensor(_target_2d(future["target"]).T, dtype=torch.float32)
-            n_targets = context.shape[0]
-            yield EvalItem(
-                data_tensor=context,
-                num_features=0,
-                num_targets=n_targets,
-                y_true=y_true,
-                naive_denom=None,
-                config_id=config_id,
-                season_length=season,
-            )
+        windows = list(zip(ds.test_data.input, ds.test_data.label))
+    except Exception as e:  # term not applicable / split too short — skip, don't fail
+        log.warning("skip (%s): %s", config_id, e)
+        return
+    if not windows:
+        log.info("skip (%s): no test windows", config_id)
+        return
+    for window_i, (ctx, future) in enumerate(windows):
+        if window_i >= cap:
+            break
+        context = torch.as_tensor(_target_2d(ctx["target"]), dtype=torch.float32)
+        y_true = torch.as_tensor(_target_2d(future["target"]).T, dtype=torch.float32)
+        yield EvalItem(
+            data_tensor=context,
+            num_features=0,
+            num_targets=context.shape[0],
+            y_true=y_true,
+            naive_denom=None,
+            config_id=config_id,
+            season_length=season,
+        )
 
 
 def iter_train_items(

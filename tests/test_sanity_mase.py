@@ -42,6 +42,23 @@ def test_seasonal_naive_forecast_repeats_last_season():
     assert torch.equal(fc, torch.tensor([3.0, 4.0, 5.0, 3.0, 4.0]))
 
 
+def test_seasonal_naive_forecast_imputes_missing_like_gluonts():
+    """Missing values in the seasonal lag are last-value-imputed (gluonts
+    SeasonalNaivePredictor) so the baseline never emits NaN (G3.1)."""
+    nan = float("nan")
+    # last season [3, NaN, 5] -> forward-fill -> [3, 3, 5]; tiled over p=5
+    ctx = torch.tensor([0.0, 1.0, 2.0, 3.0, nan, 5.0])
+    fc = seasonal_naive_forecast(ctx, m=3, p=5)
+    assert torch.isfinite(fc).all()
+    assert torch.equal(fc, torch.tensor([3.0, 3.0, 5.0, 3.0, 3.0]))
+    # leading NaN -> first finite value (back-fill)
+    lead = seasonal_naive_forecast(torch.tensor([nan, nan, 4.0]), m=3, p=3)
+    assert torch.equal(lead, torch.tensor([4.0, 4.0, 4.0]))
+    # all-NaN context -> 0 (DummyValueImputation default), still finite
+    allnan = seasonal_naive_forecast(torch.tensor([nan, nan, nan, nan]), m=2, p=4)
+    assert torch.isfinite(allnan).all() and torch.equal(allnan, torch.zeros(4))
+
+
 def test_seasonal_naive_denom_mean_abs_seasonal_diff():
     ctx = torch.tensor([1.0, 2.0, 4.0, 7.0])  # m=1 diffs |1|,|2|,|3| -> mean 2
     assert math.isclose(float(seasonal_naive_denom(ctx, m=1)), 2.0, rel_tol=1e-6)

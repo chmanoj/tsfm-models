@@ -28,10 +28,11 @@ log = logging.getLogger("tetris.tracking")
 
 
 class Tracker(Protocol):
-    """Minimal sink: the config once, scalars per step, finish at the end."""
+    """Minimal sink: the config once, scalars (+ images) per step, finish at the end."""
 
     def log_config(self, config: dict) -> None: ...
     def log_scalars(self, scalars: dict, *, step: int) -> None: ...
+    def log_image(self, key: str, path, *, step: int) -> None: ...
     def finish(self) -> None: ...
 
 
@@ -42,6 +43,9 @@ class NullTracker:
         pass
 
     def log_scalars(self, scalars: dict, *, step: int) -> None:
+        pass
+
+    def log_image(self, key: str, path, *, step: int) -> None:
         pass
 
     def finish(self) -> None:
@@ -60,6 +64,14 @@ class WandbTracker:
 
     def log_scalars(self, scalars: dict, *, step: int) -> None:
         self._run.log(dict(scalars), step=step)
+
+    def log_image(self, key: str, path, *, step: int) -> None:
+        """Upload a saved image (e.g. the sample-forecast plot) under ``key``.
+        Best-effort: a bad path/image never crashes a run."""
+        try:
+            self._run.log({key: self._wandb.Image(str(path))}, step=step)
+        except Exception as e:  # pragma: no cover - wandb/image edge cases
+            log.warning("tracker.log_image(%r) failed: %s", key, e)
 
     def finish(self) -> None:
         self._run.finish()

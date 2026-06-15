@@ -388,6 +388,152 @@ vectors across layouts (training resamples freely). All four pre-training gates
 
 ---
 
+**GIFT-Eval G3 reconciliation (test-as-training overfit — PARTIAL, blocked on eval query overflow; pinned, do not re-flag):**
+G3 is the in-distribution overfit capacity probe on real GIFT-Eval `test` data. The framing is
+**honest and deliberate**: we train on the test split's *context windows* and score the held-out
+horizons of those *same* series — this is **NOT zero-shot** (the decision log's target), it is a
+"can the architecture learn real data at all" probe. The held-out horizon is never shown to the
+model (Item-only into the reservoir; same no-leakage posture as `SanityTrainLoader`).
+
+- **Built and verified (Mac offline + WSL online):**
+  - **`data.terms: List[str]`** (config.py; default `[short, medium, long]`, validated subset of
+    short|medium|long) — replaces the single-scalar term. The leaderboard scores each config across
+    **all applicable terms** (`config_id = "{name}/{term}"`); **every configured term is attempted
+    on every config and a (config, term) that yields zero windows / a gluonts split error is
+    skipped with a warning, never fabricated** (maintainer's choice: no hardcoded med/long
+    applicability list to drift from the benchmark). `iter_eval_items` now takes `terms=(...)`,
+    loops `name × term` via `_iter_one_config_term` (materializes the split inside a guard so a
+    non-applicable term is skipped, not fatal); `eval_loader.from_download` threads `cfg.data.terms`.
+  - **`GiftEvalTestOverfitLoader`** (`data/gifteval_overfit_loader.py`) + factory key
+    **`gifteval_test_overfit`** in `build_loader` — materializes the test-window contexts once via
+    `iter_eval_items` → `to_train_item` (Item-only), cycles (overfit), rank-shards round-robin (O6),
+    raises if a rank's shard is empty. Per-config window cap = `cfg.eval.items_per_config` (the
+    universal G2 cap), so training overfits on exactly the windows the leaderboard scores.
+  - **`configs/gifteval_test_overfit.yaml`** — d=224/6L/4h, out_patch=16, L_pack=512 → **10,555,980
+    params** (confirmed on the RTX 3070; scaled from the d=64/3L=2.06M sanity model). CUDA Flex +
+    `torch.compile`; eval/plot eager.
+  - **`train/overfit_run.py`** entrypoint — mirrors `sanity_run` but eval = **`evaluate_leaderboard`**
+    (geo-mean MASE across configs, per-config breakdown logged), saves a final `model.pt`
+    (entrypoint-level; D13 per-rank reservoir checkpointing via `distributed.save_checkpoint` is
+    G5 — single-rank here), writes the sample plot, and **uploads the plot to wandb**.
+  - **`tracking.log_image`** seam (Tracker protocol + NullTracker no-op + WandbTracker
+    `wandb.Image`) — so scalars (leaderboard_mase / snaive_mase / skill / n_configs…) **and** the
+    sample-forecast plot land in wandb. `eval_scalars` already flattens the leaderboard dict.
+  - **Tests:** `tests/test_overfit_loader.py` (6, all offline: Item-only contract, cycle, no-cycle
+    drain, rank-shard disjoint+complete, empty-shard raises, factory-key dispatch via monkeypatched
+    `iter_eval_items`). Also fixed a **pre-existing fragility** in
+    `test_leaderboard.py::test_real_iterators_need_storage_root`: it `chdir`'d to defeat `.env`, but
+    python-dotenv discovers `.env` from the **source-file location, not cwd**, so on a host whose
+    `.env` defines `GIFT_EVAL` (the WSL box) the guard didn't fire — now we neutralize
+    `dotenv.load_dotenv` in the test. **Mac suite: 121 passed, 1 skipped.**
+  - **WSL:** full `test` set downloaded (`download_gifteval()` no-args → 175 files, **1.5 GB**, 56
+    base configs → 168 (config,term) pairs); **`wandb` installed** (`uv pip install wandb`; it is a
+    **lazy dep, NOT in pyproject** — the box's venv was missing it, which silently degraded tracking
+    to disabled — install it on any fresh WSL venv); **online tracking verified** (project
+    `chmanoj/tetris`, run `qropuf1u`), model confirmed at 10.56M on the 8 GiB RTX 3070.
+
+- **BLOCKER discovered (the reason G3 isn't closed) — eval query-token overflow:** the first real
+  run crashed at **baseline eval** with `ValueError: buffer 0 overflow: placing segment of size 651
+  at offset 0 exceeds l_pack=512` (`eval_loader.eval_batch` → `pack`). Root cause: `eval_spec` sizes
+  the query budget as `Q_total = n_targets·ceil(p/p_out) (+ KFF)`; for **medium/long terms** the
+  horizon `p` is ×10/×15, so `Q_total` alone can exceed `L_pack` and the per-channel context budget
+  `n` clamps to 1, giving segment size `C + Q_total > L_pack`. It is **not** a channel-count problem
+  (max C in the data is 21). Measured at L_pack=512: only **7/168** (config,term) pairs need > 512,
+  **0** need > 1024; worst is `jena_weather/long` (966; C=21, p=720, q_tok=45). `eval_spec`'s
+  docstring already flagged the latent assumption ("S ≤ L … guaranteed while Q_total < L (modest
+  benchmark p)").
+- **Maintainer's decision (rejecting "bump L_pack" / "skip configs"):** add a **max-query-token cap
+  alongside L_pack** — for any item/horizon, predict only as many horizon patches as fit in the cap
+  and **ignore the rest** (training should never one-shot a 720-step horizon; real inference does an
+  iterative rollout for very large horizons). **Interim:** `configs/gifteval_test_overfit.yaml` is
+  pinned to **`terms: [short]`** (short horizons don't overflow) so nothing regresses; the proper
+  cap fix + the full all-terms run are deferred to **session G3.1** (`prompts/gifteval_G3.1.md` —
+  full design, the Mac repro recipe, and the validation path are there).
+- **Note (benign):** the eager B=1 eval logs a FlexAttention "called without torch.compile()"
+  warning on CUDA — unfused but **correct**; only the training forward is compiled/fused (D14: eval
+  stays eager). Not a bug.
+- **Not done in G3 (carried to G3.1, now RESOLVED — see the G3.1 block below):** the max-query-token
+  cap, the overfit *run*, and the final reconciliation + handoff.
+
+---
+
+**GIFT-Eval G3.1 reconciliation (query-token cap + iterative rollout + NaN-robustness — pinned, do not re-flag):**
+G3.1 closed the G3 blocker and ran the real overfit. Three threads: (A) the max-query-token cap +
+iterative rollout, (B) overfit-loader correctness, (C) eval/metric NaN-robustness. Verified locally
+on Mac (downloaded the real 1.5 GB `test` set + 5k-step CPU overfit). The WSL 20k GPU run is the only
+remaining G3.1 deliverable.
+
+- **(A) `packing.max_query_tokens` — a first-class budget (no off-switch).** The maintainer's call:
+  it is "as essential as L_pack", set explicitly in **every** config (base=512, sanity/shakedown=128,
+  gifteval=128), validated `>= 1`. `SamplerParams.max_query_tokens` carries it (default `1<<30` =
+  "bounded only by L_pack" for direct-construction unit tests). The per-pass query budget is
+  `q_budget = min(max_query_tokens, L_pack − C)` (so ≥1 context token always fits — guarantees
+  `S ≤ L_pack`, killing the overflow). `eval_loader._capped_p` → `q_pred = q_budget // n_horizon`,
+  `p_pred = min(p, q_pred·p_out)`; `eval_batch` builds the segment for `p_pred` only; `eval_spec`
+  trusts the pre-capped `p`. **Training** (`window_sampler.sample_window`) bounds the sampled horizon
+  by the same cap (`max_q_by_cap`). The synthetic/sanity suite is unchanged (cap never binds the small
+  sanity horizons; rollout collapses to one pass).
+- **Iterative rollout (the maintainer chose to BUILD it now, overriding the prompt's deferral).**
+  `eval_loader.rollout_forecast` covers the **full** benchmark horizon in `ceil(p/p_pred)` capped,
+  autoregressive passes — each pass predicts `p_pred` steps, feeds its own raw forecast back as the
+  next pass's context (KFF feature rows revealed if known, else NaN), and `y_true` never enters the
+  context (held-out scoring preserved). `_score_item` (→ `evaluate_mase`/`evaluate_leaderboard`) and
+  the sample plot use rollout; `evaluate_test_loss` stays single-pass (a record-only diagnostic). With
+  `p_pred ≥ p` (small horizons) rollout is exactly one pass = the old single-shot eval (sanity numbers
+  unchanged). **So there is no partial-horizon caveat** — the leaderboard scores the whole horizon.
+- **(B) overfit loader trains on the merged ctx+horizon series.** The maintainer caught that the G3
+  loader fed the sampler **context-only** Items, so the model never trained on the `y_true` it is
+  scored on — you can't overfit data you never see. `gifteval_overfit_loader.merge_context_horizon`
+  now builds **one continuous series** `cat(context, y_true)` `[C, t_ctx+p]` (target rows = context ++
+  `y_true`; feature rows = context ++ `feature_future` else NaN) and the training sampler crops its
+  own ctx/horizon windows from it — exactly like `SanityTrainLoader`. This **deliberately reverses the
+  old "Item-only / no-leakage" framing**: G3.1's overfit is an honest *memorization-capacity* probe
+  (still NOT zero-shot), and the eval loader is untouched (keeps the held-out split). `min_context`
+  dropped from `out_patch+1` → **2** (the sampler's only hard floor): short series (`t_raw < out_patch`)
+  are kept and trained with an **incomplete output patch** (e.g. 4 steps → 2 ctx + 2 pred, unused tail
+  of the 16-wide patch masked), so the model learns short/1-step horizons. On the real data 0/657
+  series are dropped (merging makes even the shortest viable; min merged length 33).
+- **(C) the model must never emit non-finite output — and now doesn't.** Diagnosed at random init:
+  the model output (arcsinh space) and denorm stats (`a`, `σ`) are **always finite**; the non-finite
+  came entirely from the **unbounded inverse transform** `raw = sinh(pred)·σ + a` (`sinh` overflows
+  float32 once `|pred| ≳ 89`; the untrained head emitted arcsinh-space values up to ~750 on high-σ
+  series). Fix: clamp the prediction to **`±normalize.ARCSINH_INV_CLAMP = 10`** before `sinh` (applied
+  only at the forecast/metric boundary in `horizon_forecast_raw`; the math primitives stay exact).
+  `CAP=10` is the cross-precision choice: `sinh(10) ≈ 11013 < fp16 max (65504) < bf16/fp32` (15 would
+  overflow fp16), and arcsinh-space ±10 ≈ ±11000·σ so it never clips a legitimate prediction. Rollout
+  also `nan_to_num`s the fed-back chunk (defence in depth). **Separate, pre-existing baseline bug**
+  also fixed: `metrics.seasonal_naive_forecast` didn't impute missing values, so `*_with_missing`/
+  `bitbrains` series (NaN at the seasonal lag, up to 100% missing) NaN'd the baseline and poisoned
+  `snaive`/`skill`. Now it replicates gluonts' `SeasonalNaivePredictor`: last-value imputation
+  (forward-fill; leading NaN → first finite; all-NaN → 0) then seasonal repeat, `nanmean` fallback for
+  sub-season contexts (`metrics._impute_last_value`; no gluonts dep in the core module). The geomean
+  non-finite guard is **kept** (catches future regressions). Result at random init: all 153/153 configs
+  finite, `snaive`/`skill` finite.
+- **Optional deps now declared (`pyproject.toml`).** Real GIFT-Eval access + tracking are
+  `[project.optional-dependencies]`: **`gifteval`** (`salesforce_gift_eval` @ git, `huggingface_hub`,
+  `datasets`, `gluonts`, `python-dotenv`) and **`tracking`** (`wandb`) — `uv sync --extra gifteval
+  --extra tracking`. `[tool.uv] override-dependencies` loosens `salesforce_gift_eval`'s over-tight
+  `gluonts<0.16`/`matplotlib<3.10` pins (it runs fine on the project's versions); `allow-direct-references`
+  enables the git URL; `uv.lock` updated. **Test-count note:** with the `gifteval` extra installed,
+  `test_leaderboard.py::test_download_requires_hf_when_absent` (the *ImportError-path* test) correctly
+  **skips** because `huggingface_hub` is now present → suite reads **130 passed, 2 skipped** on a
+  gifteval-equipped box (vs 131 passed, 1 skipped without the extra). Not a regression.
+- **Local Mac validation (CPU, 10.56M, items_per_config=5, all terms).** Downloaded the real `test`
+  set (175 files, 1.5 GB). Baseline eval no longer crashes (290+ items, C≤21, p≤900, skipped=0). 5k
+  overfit: leaderboard MASE **226 → 9.15** (≈25× in 5k steps), skill **118 → 4.78**, all 153 configs
+  finite throughout, **37/153 already beat seasonal-naive** (e.g. `bizitobs_l2c/5T/short` 0.48). Does
+  not beat naive in aggregate yet (low-freq weekly/monthly configs still poor) — expected for a 5k CPU
+  probe; the full run is 20k / items_per_config=10 on the WSL GPU.
+- **Tests:** `tests/test_eval_query_cap.py` (cap math, no-overflow repro red→green, rollout full-horizon
+  coverage + single-pass collapse, inversion clamp, rollout sanitize, training cap); `test_overfit_loader`
+  updated for the merge + the drop floor; `test_sanity_mase` gains the gluonts-style snaive imputation
+  case. **Mac suite (with extras): 130 passed, 2 skipped.**
+- **Still open (G3.1 remainder):** the **WSL 20k GPU run** (compiled Flex path, all terms, the experiments-doc
+  section + skill log) — bring the box up, `uv sync --extra gifteval --extra tracking`, rsync (exclude `.env`),
+  flip `configs/gifteval_test_overfit.yaml` `eval.items_per_config` back to 10, run 20k.
+
+---
+
 ## 1. Notation & global shape constants
 
 All per-batch shapes are static (D14: one compile graph; per-sample variability lives in tensor *contents*, never shapes).

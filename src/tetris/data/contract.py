@@ -87,6 +87,12 @@ def build_loader(cfg, *, rank: int = 0, world_size: int = 1):
         from .sanity_loader import SanityTrainLoader
 
         return SanityTrainLoader.from_cfg(cfg, rank=rank, world_size=world_size)
+    if name == "gifteval_test_overfit":
+        # G3: the real GIFT-Eval test split's contexts as training Items (Item-only;
+        # in-distribution overfit). Lazy/network — needs the gift_eval extras + data.
+        from .gifteval_overfit_loader import GiftEvalTestOverfitLoader
+
+        return GiftEvalTestOverfitLoader.from_cfg(cfg, rank=rank, world_size=world_size)
     raise NotImplementedError(
         f"training loader {name!r} unknown; GIFT-Eval is record-only — use build_eval_loader"
     )

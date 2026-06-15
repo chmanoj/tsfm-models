@@ -32,6 +32,11 @@ class SamplerParams:
     tier_prior: Tuple[int, ...] = (16, 16, 16, 16, 16, 8)  # D12 ratio prior
     q_tok_max: int = 4              # max horizon tokens per horizon channel (design point: 4)
     kff_reveal_prob: float = 0.0    # per native feature, reveal known-future (D11, partial)
+    # G3.1 query-token budget: Q_total = n_horizon_channels·q_tok ≤ max_query_tokens.
+    # cfg construction passes packing.max_query_tokens; the very large default means
+    # "bounded only by L_pack" (the existing per-channel budget) so direct-construction
+    # unit tests are unchanged. Never an off-switch — it is always a real budget.
+    max_query_tokens: int = 1 << 30
 
     def __post_init__(self) -> None:
         assert self.p_out in PATCH, f"p_out {self.p_out} must be in the patch vocabulary {PATCH}"
@@ -55,7 +60,10 @@ def sample_window(n_features: int, n_targets: int, t_raw: int, params: SamplerPa
     # Cap horizon so >=1 context token per channel fits and it fits the series.
     max_q_by_budget = max(1, (params.l_pack - C) // max(1, n_horizon_channels))
     max_q_by_series = max(1, (t_raw - 1) // params.p_out)
-    q_tok_max = max(1, min(params.q_tok_max, max_q_by_budget, max_q_by_series))
+    # G3.1: also bound by the max-query-token budget so a training segment never
+    # one-shots a huge horizon (Q_total = n_horizon_channels·q_tok ≤ max_query_tokens).
+    max_q_by_cap = max(1, params.max_query_tokens // max(1, n_horizon_channels))
+    q_tok_max = max(1, min(params.q_tok_max, max_q_by_budget, max_q_by_series, max_q_by_cap))
 
     q_tok = int(rng.integers(1, q_tok_max + 1))
     # variable-p within the chosen query-token band (D6): p in ((q_tok-1)·P, q_tok·P]

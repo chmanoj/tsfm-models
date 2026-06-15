@@ -93,6 +93,7 @@ class StreamingReservoir:
             p_out=cfg.model.out_patch,
             tier_prior=tuple(cfg.model.tier_alloc_per_channel),
             kff_reveal_prob=float(getattr(cfg.data, "kff_reveal_prob", 0.0)),
+            max_query_tokens=cfg.packing.max_query_tokens,
         )
         return cls(
             loader,

@@ -170,9 +170,17 @@ def test_leaderboard_data_nan_horizon_is_masked_not_skipped():
 
 def test_real_iterators_need_storage_root(monkeypatch, tmp_path):
     """Dep-free: no local_dir + no $GIFT_EVAL (+ no .env) -> ValueError before any
-    lazy import. chdir to a tmp dir so a repo-root .env can't supply the path."""
+    lazy import. chdir to a tmp dir AND neutralize python-dotenv so an ambient
+    repo-root .env (e.g. the WSL host's, which defines GIFT_EVAL) can't supply the
+    path — python-dotenv discovers .env from the source-file location, not cwd, so
+    chdir alone isn't enough on every host."""
     monkeypatch.delenv(gd.TEST_ENV_VAR, raising=False)
     monkeypatch.chdir(tmp_path)
+    try:
+        import dotenv
+        monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: None)
+    except ImportError:  # dotenv absent -> nothing to neutralize
+        pass
     with pytest.raises(ValueError, match="storage root"):
         next(gd.iter_eval_items(""))
     with pytest.raises(ValueError, match="storage root"):

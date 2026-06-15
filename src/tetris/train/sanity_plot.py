@@ -13,10 +13,9 @@ import random
 
 import torch
 
-from ..data.eval_loader import eval_batch, horizon_forecast_raw
+from ..data.eval_loader import rollout_forecast
 from ..metrics import seasonal_naive_forecast
 from ..tokenize.window_sampler import SamplerParams
-from .step import make_basis
 
 
 def _season_of(item, ch_global: int) -> int:
@@ -38,16 +37,17 @@ def plot_eval_samples(forward, eval_loader, cfg, *, out_path: str, n: int = 3,
     params = SamplerParams(
         l_pack=cfg.packing.L_pack, p_out=cfg.model.out_patch,
         tier_prior=tuple(cfg.model.tier_alloc_per_channel),
+        max_query_tokens=cfg.packing.max_query_tokens,
     )
     p_out = cfg.model.out_patch
     nt_max = max(items[i].num_targets for i in idxs)
 
     def _forecast(it):
-        batch = eval_batch(it, params, p_out=p_out, l_pack=cfg.packing.L_pack).to(device)
-        gen = torch.Generator(device=device).manual_seed(basis_seed)
-        basis = make_basis(batch, cfg.model.d_model, device=device, generator=gen)
-        out = forward(batch, variate_basis=basis)
-        return horizon_forecast_raw(out, batch, it, p_out=p_out).cpu()  # [p, nt]
+        # Full-horizon forecast via the same iterative rollout the leaderboard uses
+        # (G3.1): one capped pass for small horizons, ceil(p/p_pred) for long ones.
+        return rollout_forecast(forward, it, params, d_model=cfg.model.d_model,
+                                p_out=p_out, l_pack=cfg.packing.L_pack,
+                                device=device, basis_seed=basis_seed)  # [p, nt]
 
     fig, axes = plt.subplots(len(idxs), nt_max, squeeze=False,
                              figsize=(max(11.0, 5.0 * nt_max), 2.7 * len(idxs) + 0.6),

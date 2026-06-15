@@ -27,6 +27,7 @@ def sampler_params(cfg: Config) -> SamplerParams:
         l_pack=cfg.packing.L_pack,
         p_out=cfg.model.out_patch,
         tier_prior=tuple(cfg.model.tier_alloc_per_channel),
+        max_query_tokens=cfg.packing.max_query_tokens,
     )
 
 

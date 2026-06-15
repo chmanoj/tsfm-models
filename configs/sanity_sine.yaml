@@ -30,6 +30,7 @@ data:
 
 packing:
   L_pack: 256
+  max_query_tokens: 128   # per-pass horizon-token budget (G3.1)
   buffers_per_step: 4
   reservoir: true
   reservoir_k: 64

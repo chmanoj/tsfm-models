@@ -23,6 +23,7 @@ data:
   synthetic_mix: { shared_factor: 0.5, univariate: 0.4, lag_probe: 0.1 }
 packing:
   L_pack: 256
+  max_query_tokens: 128            # per-pass horizon-token budget (G3.1)
   buffers_per_step: 2               # B
   reservoir: false                  # Stage 10 trivial path; flip true at Stage 11
 norm:                               # D10 axes — all must run

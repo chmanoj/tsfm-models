@@ -94,11 +94,28 @@ class DataCfg:
     kff_reveal_prob: float = 0.0
     # Download root for the real GIFT-Eval tree (lazy; threaded to the eval loader).
     local_dir: str = ""
+    # GIFT-Eval horizon terms (short|medium|long = ×1/10/15). The leaderboard scores
+    # each config across ALL applicable terms simultaneously, so this is a list, not a
+    # scalar; config_id = "{name}/{term}". Shared by the test-as-training overfit loader
+    # (G3) and the real eval loader so train/eval windows use the same terms. Every
+    # configured term is attempted on every config; a (config, term) yielding zero
+    # valid test windows (series too short for the ×10/×15 horizon, or a gluonts split
+    # error) is skipped, not fabricated (no hardcoded applicability list to drift from
+    # the benchmark).
+    terms: List[str] = field(default_factory=lambda: ["short", "medium", "long"])
 
 
 @dataclass
 class PackingCfg:
     L_pack: int = 1024             # -> 2048 expansion (D12)
+    # Max query (horizon) tokens budgeted per segment — a first-class budget
+    # alongside L_pack (G3.1). Bounds how much horizon a single forward pass may
+    # predict: `Q_total = n_horizon_channels · q_tok ≤ max_query_tokens`. Training
+    # truncates the sampled horizon to this; eval/inference covers the full
+    # benchmark horizon by *iterating* (autoregressive rollout, ceil(p/p_pred)
+    # passes). Set per config (essential, like L_pack); the sampler additionally
+    # clamps the budget to `L_pack − C` at runtime so ≥1 context token always fits.
+    max_query_tokens: int = 256
     buffers_per_step: int = 8      # B
     reservoir: bool = True         # trivial path flips this off (Stage 10)
     # Streaming packer (S11/D9.3): reservoir size K (doubles as shuffle buffer);
@@ -186,6 +203,8 @@ class Config:
             raise ValueError("model.tier_alloc_per_channel entries must be positive (ratio prior)")
         if self.model.encoder_cap < 0:
             raise ValueError("model.encoder_cap must be >= 0 (0 resolves to packing.L_pack)")
+        if self.packing.max_query_tokens < 1:
+            raise ValueError("packing.max_query_tokens must be >= 1 (query-token budget, G3.1)")
         if self.packing.reservoir_k < 1:
             raise ValueError("packing.reservoir_k must be >= 1")
         if self.packing.scheduler_window < 1:
@@ -204,6 +223,8 @@ class Config:
             raise ValueError(
                 f"eval.items_per_config must be -1 (all) or >= 1; got {self.eval.items_per_config}"
             )
+        if not self.data.terms or any(t not in ("short", "medium", "long") for t in self.data.terms):
+            raise ValueError(f"data.terms must be a non-empty subset of short|medium|long; got {self.data.terms}")
         if self.tracking.backend not in ("wandb", "none"):
             raise ValueError(f"unknown tracking.backend={self.tracking.backend!r}")
         if self.tracking.mode not in ("auto", "online", "offline", "disabled"):

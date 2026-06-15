@@ -1,0 +1,56 @@
+# GIFT-Eval `test`-split OVERFIT (G3) — in-distribution capacity probe on real data.
+# NOT zero-shot: the model trains on the test split's context windows and is then
+# scored on the held-out horizons of those same series (leaderboard MASE = geo-mean
+# across configs). Honest framing recorded in the G3 reconciliation block.
+#
+# ~10.5M params (d=224/6L/4h, scaled up from the d=64/3L sanity model). CUDA Flex +
+# torch.compile (the real D14 path); falls back to SDPA/eager off CUDA.
+#
+#   # smoke (WSL): 500 steps, eval every 250
+#   uv run python -m tetris.train.overfit_run configs/gifteval_test_overfit.yaml \
+#       --steps 500 --eval-every 250
+#   # full run (WSL): 20k steps, eval every 5k
+#   uv run python -m tetris.train.overfit_run configs/gifteval_test_overfit.yaml \
+#       --steps 20000 --eval-every 5000
+
+run:
+  name: gifteval_test_overfit
+  steps: 20000
+  seed: 0
+
+backend:
+  device: auto
+  compile: true            # CUDA Flex + torch.compile (no-op off CUDA)
+
+model:
+  d_model: 224             # ~10.56M params at 6 layers (sanity was d=64/3L=2.06M)
+  n_layers: 6
+  n_heads: 4
+  out_patch: 16
+
+data:
+  loader: gifteval_test_overfit
+  # G3.1: all terms. Medium/long horizons no longer overflow — the max_query_tokens
+  # budget below caps how much horizon a single forward pass predicts; eval covers the
+  # full benchmark horizon by iterating (autoregressive rollout). See the G3.1 block.
+  terms: [short, medium, long]
+  local_dir: ""            # empty -> $GIFT_EVAL (repo-root .env: Mac for the local 2k probe, WSL for the full run)
+
+packing:
+  L_pack: 512
+  max_query_tokens: 128    # per-pass horizon-token budget (G3.1). Worst real config
+                           # (jena_weather/long, C=21) -> q_pred=6, p_pred=96, ~8 rollout passes.
+  buffers_per_step: 4      # conservative for the 8 GiB RTX 3070
+  reservoir: true
+  reservoir_k: 500         # shuffle buffer over the materialized test contexts
+  scheduler_window: 64
+
+eval:
+  enabled: true
+  loader: gifteval_test            # real GIFT-Eval test windows -> leaderboard MASE
+  items_per_config: 10             # per-config cap: train contexts == leaderboard windows
+
+tracking:
+  backend: wandb           # online iff logged-in (.env WANDB_API_KEY) + reachable, else offline
+  project: tetris
+  mode: auto

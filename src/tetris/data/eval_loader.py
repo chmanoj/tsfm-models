@@ -36,6 +36,7 @@ from ..metrics import (
     seasonal_naive_denom,
     seasonal_naive_forecast,
 )
+from ..normalize import ARCSINH_INV_CLAMP
 from ..packing.collator import Batch, pack
 from ..tokenize.assemble import assemble
 from ..tokenize.spec import SegmentSpec
@@ -59,6 +60,10 @@ def eval_spec(n_features: int, n_targets: int, t_ctx: int, p: int,
     ``kff_features`` (D11): when set, the feature channels are marked **KFF** so
     their revealed future is tokenized as observed CTX feature tokens at ``t>0``
     (``K = n_features·q_tok`` extra slots); otherwise features are past-only.
+
+    The caller (``eval_batch``) pre-caps ``p`` to the query-token budget via
+    :func:`_capped_p`, so ``Q_total ≤ L_pack − C`` and ``S ≤ L_pack`` hold by
+    construction; the long-horizon overflow is handled by *rollout*, not here.
     """
     C = n_features + n_targets
     q_tok = ceil(p / params.p_out)
@@ -82,13 +87,30 @@ def eval_spec(n_features: int, n_targets: int, t_ctx: int, p: int,
     )
 
 
+def _capped_p(p: int, n_horizon_channels: int, C: int,
+              params: SamplerParams, l_pack: int) -> int:
+    """Horizon (raw steps) a **single** forward pass may predict under the query
+    budget (G3.1). The query budget is ``min(max_query_tokens, L_pack − C)`` so
+    ``Q_total = n_horizon_channels·q_pred`` always leaves ≥1 context token/channel
+    (``S ≤ L_pack``). Returns ``min(p, q_pred·p_out)``; the caller covers the rest
+    of ``p`` by iterating (:func:`rollout_forecast`)."""
+    q_budget = min(int(params.max_query_tokens), max(1, l_pack - C))
+    q_pred = max(1, q_budget // max(1, n_horizon_channels))
+    return min(p, q_pred * params.p_out)
+
+
 def eval_batch(item: EvalItem, params: SamplerParams, *, p_out: int, l_pack: int) -> Batch:
-    """Pack one :class:`EvalItem` into a one-segment buffer for scoring.
+    """Pack one :class:`EvalItem` into a one-segment buffer for **one** forward pass.
 
     The held-out ``y_true`` is appended after the context (target rows only;
     feature rows get NaN, which carry no horizon tokens) so ``assemble`` reads it
     as the post-origin horizon → ``horizon_target``. Context stats are computed
     from context only, so normalization never sees ``y_true``.
+
+    The predicted horizon is capped to the query-token budget (:func:`_capped_p`):
+    only the first ``p_pred`` steps of ``y_true`` are placed, so the segment always
+    fits ``l_pack``. Full benchmark horizons are covered by :func:`rollout_forecast`,
+    which calls this once per chunk; a chunk already within budget is uncapped.
     """
     validate_item(to_train_item(item))
     data = item.data_tensor
@@ -97,16 +119,19 @@ def eval_batch(item: EvalItem, params: SamplerParams, *, p_out: int, l_pack: int
     p = int(item.y_true.shape[0])
     assert item.y_true.shape[1] == nt, (item.y_true.shape, nt)
 
-    full = torch.full((C, t_ctx + p), float("nan"), dtype=torch.float32)
-    full[:, :t_ctx] = data
-    full[nf:, t_ctx:] = item.y_true.to(torch.float32).T  # [p, nt] -> [nt, p]
     # D11 KFF: reveal known-future covariates so assemble encodes them as CTX
     # feature tokens at t>0 (target rows stay [MASK]; no leakage of y_true).
     kff = item.feature_future is not None and nf > 0
-    if kff:
-        full[:nf, t_ctx:] = item.feature_future.to(torch.float32).T  # [p, nf] -> [nf, p]
+    n_horizon = nt + (nf if kff else 0)
+    p_pred = _capped_p(p, n_horizon, C, params, l_pack)
 
-    spec = eval_spec(nf, nt, t_ctx, p, params, kff_features=kff)
+    full = torch.full((C, t_ctx + p_pred), float("nan"), dtype=torch.float32)
+    full[:, :t_ctx] = data
+    full[nf:, t_ctx:] = item.y_true[:p_pred].to(torch.float32).T  # [p_pred, nt] -> [nt, p_pred]
+    if kff:
+        full[:nf, t_ctx:] = item.feature_future[:p_pred].to(torch.float32).T  # [p_pred, nf] -> [nf, p_pred]
+
+    spec = eval_spec(nf, nt, t_ctx, p_pred, params, kff_features=kff)
     seg = assemble((full, nf, nt), spec, p_out)
     return pack([[seg]], l_pack=l_pack, p_out=p_out)
 
@@ -137,6 +162,7 @@ class GiftEvalEvalLoader:
         from .gifteval_download import iter_eval_items
 
         items = list(iter_eval_items(local_dir, configs=configs,
+                                     terms=tuple(getattr(cfg.data, "terms", ("short",))),
                                      items_per_config=cfg.eval.items_per_config))
         return cls(items)
 
@@ -195,6 +221,7 @@ def evaluate_test_loss(
     params = SamplerParams(
         l_pack=cfg.packing.L_pack, p_out=cfg.model.out_patch,
         tier_prior=tuple(cfg.model.tier_alloc_per_channel),
+        max_query_tokens=cfg.packing.max_query_tokens,
     )
     cap = cfg.eval.shard_windows if max_windows is None else max_windows
     total, count = 0.0, 0
@@ -222,9 +249,12 @@ def horizon_forecast_raw(out, batch, item: EvalItem, *, p_out: int) -> torch.Ten
 
     Query tokens (``role == QRY``) carry the per-patch horizon prediction in
     anchored-arcsinh space; ``raw = sinh(pred)·σ + a`` per token (D10 Stage-9
-    inversion, stats broadcast on the Batch). Each query token maps to target
-    channel ``channel_idx - nf`` and horizon patch ``j`` (from ``t_center``);
-    returns ``[p, num_targets]`` (NaN where no query covers a step)."""
+    inversion, stats broadcast on the Batch). The prediction is clamped to
+    ``±normalize.ARCSINH_INV_CLAMP`` before ``sinh`` so the exponential cannot
+    overflow (an unbounded arcsinh-space value → ±inf → poisoned MASE / NaN-cascade
+    in rollout; G3.1). Each query token maps to target channel ``channel_idx - nf``
+    and horizon patch ``j`` (from ``t_center``); returns ``[p, num_targets]`` (NaN
+    where no query covers a step)."""
     nf, nt = item.num_features, item.num_targets
     p = int(item.y_true.shape[0])
     pred = out.horizon[0]                         # [L, P_out] (B=1, one segment)
@@ -241,7 +271,8 @@ def horizon_forecast_raw(out, batch, item: EvalItem, *, p_out: int) -> torch.Ten
         if ti < 0 or ti >= nt:
             continue
         j = int(round((float(tcen[pos]) - p_out * 0.5) / p_out))
-        raw = torch.sinh(pred[pos]) * sig[pos] + a[pos]   # [P_out]
+        z = pred[pos].clamp(-ARCSINH_INV_CLAMP, ARCSINH_INV_CLAMP)
+        raw = torch.sinh(z) * sig[pos] + a[pos]   # [P_out], finite by construction
         lo = j * p_out
         hi = min(lo + p_out, p)
         if lo >= p:
@@ -264,26 +295,89 @@ def _gmean(xs) -> float:
 
 
 @torch.no_grad()
+def _forward_forecast(forward, item: EvalItem, params, *, d_model: int, p_out: int,
+                      l_pack: int, device: str, basis_seed: int) -> torch.Tensor:
+    """One eval forward → raw-space horizon forecast ``[p_pass, n_targets]``.
+
+    ``p_pass = item.y_true.shape[0]`` (already within the query budget for a rollout
+    chunk; otherwise ``eval_batch`` caps it). Marks R/n_var dynamic + hoists the
+    block mask so the compiled mid-train eval reuses one B=1 graph (D14; G1
+    GPU-note #1)."""
+    batch = eval_batch(item, params, p_out=p_out, l_pack=l_pack).to(device)
+    gen = torch.Generator(device=device).manual_seed(basis_seed)
+    basis = make_basis(batch, d_model, device=device, generator=gen)
+    mark_dynamic_batch(batch, basis)
+    out = forward(batch, variate_basis=basis, block_mask=make_block_mask(batch))
+    return horizon_forecast_raw(out, batch, item, p_out=p_out).cpu()  # [p_pass, nt]
+
+
+@torch.no_grad()
+def rollout_forecast(forward, item: EvalItem, params, *, d_model: int, p_out: int,
+                     l_pack: int, device: str, basis_seed: int) -> torch.Tensor:
+    """Autoregressive rollout (G3.1) — cover the **full** benchmark horizon ``p`` in
+    ``ceil(p / p_pred)`` query-budget-capped passes, feeding each predicted chunk
+    back as context.
+
+    Each pass predicts ``p_pred`` raw steps (the most the query budget allows,
+    :func:`_capped_p`); the model's own forecast (target rows) is appended to the
+    running context for the next pass (known-future feature rows are revealed when
+    KFF, else left NaN/unobserved). ``y_true`` is **never** fed into the context —
+    it only fills the per-pass ``horizon_target`` (MASK query slots, causal-blocked),
+    the same no-leakage posture as a single eval. With ``p_pred ≥ p`` (small
+    horizons) this is exactly one pass, byte-for-byte the old single-shot eval.
+    Returns raw-space ``[p, n_targets]``."""
+    nf, nt = item.num_features, item.num_targets
+    p = int(item.y_true.shape[0])
+    C = item.data_tensor.shape[0]
+    kff = item.feature_future is not None and nf > 0
+    n_horizon = nt + (nf if kff else 0)
+    p_pred = _capped_p(p, n_horizon, C, params, l_pack)
+
+    forecast = torch.full((p, nt), float("nan"), dtype=torch.float32)
+    context = item.data_tensor.to(torch.float32).clone()  # [C, t_now]; grows per pass
+    done = 0
+    while done < p:
+        chunk = min(p_pred, p - done)
+        feat_fut = item.feature_future[done:done + chunk] if kff else None
+        sub = EvalItem(
+            data_tensor=context, num_features=nf, num_targets=nt,
+            y_true=item.y_true[done:done + chunk], naive_denom=None,
+            config_id=item.config_id, season_length=item.season_length,
+            channel_seasons=item.channel_seasons, feature_future=feat_fut,
+        )
+        fc = _forward_forecast(forward, sub, params, d_model=d_model, p_out=p_out,
+                               l_pack=l_pack, device=device, basis_seed=basis_seed)  # [chunk, nt]
+        forecast[done:done + chunk] = fc                  # stored as-is (guard sees any non-finite)
+        # Feed predictions back as the next pass's context: targets = our own
+        # forecast; known-future feature rows revealed if KFF, else NaN (unobserved).
+        # Sanitize the fed-back targets so a pathological pass can't cascade NaN/inf
+        # into the next pass's normalization (the ±clamp inversion already bounds
+        # these; this is the defensive belt-and-suspenders, G3.1).
+        ext = torch.full((C, chunk), float("nan"), dtype=torch.float32)
+        ext[nf:] = torch.nan_to_num(fc.T, nan=0.0, posinf=0.0, neginf=0.0)
+        if kff:
+            ext[:nf] = feat_fut.to(torch.float32).T
+        context = torch.cat([context, ext], dim=1)
+        done += chunk
+    return forecast
+
+
+@torch.no_grad()
 def _score_item(forward, item: EvalItem, params, *, d_model: int, p_out: int,
                 l_pack: int, device: str, basis_seed: int):
     """Per-channel ``(model_mase, snaive_mase)`` lists for one eval item.
 
-    Inverts the model horizon to raw space and scores it (and the seasonal-naive
-    baseline) against ``y_true`` per target channel, with the **dataset-provided**
-    season (``EvalItem.season_length`` / ``channel_seasons``; never detected here).
+    Inverts the model horizon to raw space (via the full-horizon iterative
+    :func:`rollout_forecast`) and scores it (and the seasonal-naive baseline)
+    against ``y_true`` per target channel, with the **dataset-provided** season
+    (``EvalItem.season_length`` / ``channel_seasons``; never detected here).
     Returns ``None`` when the item carries no ``season_length``. Shared by
     ``evaluate_mase`` (global gmean) and ``evaluate_leaderboard`` (per-config)."""
     if item.season_length is None:
         return None
     nf, nt = item.num_features, item.num_targets
-    batch = eval_batch(item, params, p_out=p_out, l_pack=l_pack).to(device)
-    gen = torch.Generator(device=device).manual_seed(basis_seed)
-    basis = make_basis(batch, d_model, device=device, generator=gen)
-    # See evaluate_test_loss: dynamic-mark R/n_var + hoist the block mask so the
-    # compiled mid-train eval reuses one B=1 graph (D14; G1 GPU-note #1).
-    mark_dynamic_batch(batch, basis)
-    out = forward(batch, variate_basis=basis, block_mask=make_block_mask(batch))
-    forecast = horizon_forecast_raw(out, batch, item, p_out=p_out).cpu()  # [p, nt]
+    forecast = rollout_forecast(forward, item, params, d_model=d_model, p_out=p_out,
+                                l_pack=l_pack, device=device, basis_seed=basis_seed)  # [p, nt]
     y_true = item.y_true.to(torch.float32)                                # [p, nt]
     context = item.data_tensor                                            # [C, t_ctx]
     model_mases: List[float] = []
@@ -328,6 +422,7 @@ def evaluate_mase(
     params = SamplerParams(
         l_pack=cfg.packing.L_pack, p_out=cfg.model.out_patch,
         tier_prior=tuple(cfg.model.tier_alloc_per_channel),
+        max_query_tokens=cfg.packing.max_query_tokens,
     )
     p_out = cfg.model.out_patch
     cap = cfg.eval.shard_windows if max_windows is None else max_windows
@@ -382,6 +477,7 @@ def evaluate_leaderboard(
     params = SamplerParams(
         l_pack=cfg.packing.L_pack, p_out=cfg.model.out_patch,
         tier_prior=tuple(cfg.model.tier_alloc_per_channel),
+        max_query_tokens=cfg.packing.max_query_tokens,
     )
     p_out = cfg.model.out_patch
     cap = cfg.eval.items_per_config if items_per_config is None else items_per_config
