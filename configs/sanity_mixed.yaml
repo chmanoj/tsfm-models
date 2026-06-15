@@ -1,0 +1,46 @@
+# Sanity stage — ALL cases mixed in one run. Each series is drawn (round-robin)
+# from {sine_univariate, multivariate_independent, shared_factor, features_target,
+# kff_driver}; the model must learn them all at once. Feature channels are
+# known-future (KFF revealed in training + eval), so feature-bearing cases use the
+# D11 path. This is the v1 capstone; the v2 stress test (large frequency pool) is
+# tracked in docs/tetris/sanity_experiments/README.md.
+
+run:
+  name: sanity_mixed
+  steps: 12000
+  seed: 0
+
+backend:
+  device: auto
+  compile: false
+
+model:
+  d_model: 64
+  n_layers: 3
+  n_heads: 4
+  out_patch: 8
+
+data:
+  loader: sanity
+  case: mixed
+  mix_cases: [sine_univariate, multivariate_independent, shared_factor, features_target, kff_driver]
+  season_lengths: [12, 24, 48]
+  channels_distribution: [2, 6]   # multivariate/shared cases vary channel count per sample
+  horizon: 32
+  series_len: 512
+  n_series: 80
+  n_channels: 4
+  known_future_features: true     # reveal feature futures at eval (D11)
+  kff_reveal_prob: 1.0            # and during training, so the model learns to use them
+
+packing:
+  L_pack: 256
+  buffers_per_step: 4
+  reservoir: true
+  reservoir_k: 80
+  scheduler_window: 64
+
+eval:
+  enabled: true
+  loader: sanity_eval
+  shard_windows: 80

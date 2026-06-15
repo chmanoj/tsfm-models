@@ -76,7 +76,8 @@ class DataCfg:
     # mirroring GIFT-Eval's test split. `case` selects the generator family;
     # `season_lengths` is the calendar-style period pool (e.g. weekly=7, daily=24);
     # `horizon` is the held-out forecast length; `series_len` the per-series length.
-    case: str = "sine_univariate"
+    case: str = "sine_univariate"   # one of SANITY_CASES, or "mixed"
+    mix_cases: List[str] = field(default_factory=list)  # used when case == "mixed" (empty -> all)
     season_lengths: List[int] = field(default_factory=lambda: [24])
     horizon: int = 32
     series_len: int = 512

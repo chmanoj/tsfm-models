@@ -117,11 +117,14 @@ def _make_run_dir(cfg: Config) -> Path:
 
 
 def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
-               eval_every: int = 0, device: str = None, n_plot: int = 3) -> dict:
+               eval_every: int = 0, device: str = None, n_plot: int = 3,
+               compile: bool = None) -> dict:
     cfg = load_config(cfg_path)
     steps = steps or cfg.run.steps
     eval_every = eval_every or max(1, steps // 4)
     device = device or resolve_device(cfg.backend.device)
+    if compile is not None:
+        cfg.backend.compile = bool(compile)
 
     run_dir = _make_run_dir(cfg)
     # Reproducibility artifacts: exact command + resolved config.
@@ -136,6 +139,16 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     model = Tetris(cfg).to(device)
     eval_loader = build_eval_loader(cfg, local_dir=cfg.data.local_dir or None)
     total, trainable = _count_params(model)
+
+    # Real CUDA path (D14): FlexAttention + torch.compile. Compile only the
+    # *training* forward (one graph after warmup; R/n_var marked dynamic by the
+    # step). Eval/plot stay eager (B=1, per-item shapes) — same params, used as the
+    # correctness reference. Compile is a no-op off CUDA.
+    compiled = bool(cfg.backend.compile) and device.startswith("cuda")
+    forward_train = model
+    if compiled:
+        log.info("torch.compile: ON (Flex backend, dynamic R/n_var) — first steps include compile")
+        forward_train = torch.compile(model)
 
     log.info("run_dir=%s", run_dir)
     log.info("device: %s", _device_info(device))
@@ -157,10 +170,13 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     def _on_eval(step, r, loss):
         log.info("step %5d/%d: train_loss=%.4f  %s  [eval]", step, steps, loss, _fmt(r))
 
+    # Mid-train eval uses the training forward; when compiled, the eager B=1 eval
+    # would recompile per item, so skip it under compile (base/final eval cover it).
+    loop_eval = None if compiled else eval_loader
     t0 = time.perf_counter()
     losses = run_training(
-        cfg, steps=steps, lr=lr, device=device, model=model,
-        eval_loader=eval_loader, eval_every=eval_every,
+        cfg, steps=steps, lr=lr, device=device, model=model, forward=forward_train,
+        eval_loader=loop_eval, eval_every=(0 if compiled else eval_every),
         eval_fn=evaluate_mase, log_every=log_every, on_log=_on_log, on_eval=_on_eval,
     )
     elapsed = time.perf_counter() - t0
@@ -205,9 +221,13 @@ def main() -> None:
     ap.add_argument("--eval-every", type=int, default=0)
     ap.add_argument("--device", default=None)
     ap.add_argument("--n-plot", type=int, default=3)
+    ap.add_argument("--compile", dest="compile", action="store_true", default=None,
+                    help="force torch.compile on (CUDA Flex path); default reads backend.compile")
+    ap.add_argument("--no-compile", dest="compile", action="store_false",
+                    help="force torch.compile off")
     args = ap.parse_args()
     run_sanity(args.config, steps=args.steps, lr=args.lr, eval_every=args.eval_every,
-               device=args.device, n_plot=args.n_plot)
+               device=args.device, n_plot=args.n_plot, compile=args.compile)
 
 
 if __name__ == "__main__":

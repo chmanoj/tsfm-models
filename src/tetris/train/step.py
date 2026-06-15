@@ -14,7 +14,9 @@ from typing import Optional, Sequence
 
 import torch
 
+from ..backend import backend_kind
 from ..losses import LossBreakdown, compute_loss
+from ..masks import build_block_mask, build_sdpa_mask
 from ..model.variate_id import sample_orthonormal_basis
 
 
@@ -37,6 +39,16 @@ def mark_dynamic_batch(batch, basis: torch.Tensor) -> None:
     torch._dynamo.mark_dynamic(basis, 1)
 
 
+def make_block_mask(batch):
+    """Build the attention mask **eagerly** for the hoist out of the compiled
+    forward (D14): a FlexAttention ``BlockMask`` can't be constructed inside
+    ``torch.compile`` (inductor can't lower ``create_block_mask``). Flex on CUDA,
+    materialized bool mask on CPU/MPS."""
+    if backend_kind(batch.sample_id.device) == "flex":
+        return build_block_mask(batch.sample_id, batch.role, batch.t_center)
+    return build_sdpa_mask(batch.sample_id, batch.role, batch.t_center)
+
+
 def train_step(
     forward,
     batch,
@@ -46,8 +58,9 @@ def train_step(
     aux_weights: Sequence[float],
     loss_space: str = "arcsinh",
 ) -> LossBreakdown:
-    """Run one optimization step; returns the loss breakdown (D6)."""
-    out = forward(batch, variate_basis=basis)
+    """Run one optimization step; returns the loss breakdown (D6). The block mask is
+    built eagerly here and passed in (hoisted out of the compiled forward)."""
+    out = forward(batch, variate_basis=basis, block_mask=make_block_mask(batch))
     lb = compute_loss(out, batch, aux_weights=aux_weights, loss_space=loss_space)
     optimizer.zero_grad(set_to_none=True)
     lb.total.backward()

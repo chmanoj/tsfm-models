@@ -50,6 +50,7 @@ class Tetris(nn.Module):
         self,
         batch,
         variate_basis: Optional[torch.Tensor] = None,
+        block_mask=None,
         *,
         generator: Optional[torch.Generator] = None,
     ) -> ModelOutput:
@@ -68,14 +69,18 @@ class Tetris(nn.Module):
         )
         tokens = self.embed(batch, content, variate)
 
-        if kind == "flex":
-            mask = build_block_mask(batch.sample_id, batch.role, batch.t_center)
-        else:
-            mask = build_sdpa_mask(batch.sample_id, batch.role, batch.t_center)
+        # Mask is **hoisted out of the compiled region** (D14): a FlexAttention
+        # BlockMask cannot be built inside ``torch.compile`` (inductor can't lower
+        # ``create_block_mask``), so the training step builds it eagerly and passes
+        # it in. ``block_mask is None`` (eager/eval/standalone) → build it here.
+        if block_mask is None:
+            block_mask = (build_block_mask(batch.sample_id, batch.role, batch.t_center)
+                          if kind == "flex"
+                          else build_sdpa_mask(batch.sample_id, batch.role, batch.t_center))
 
         h = tokens
         for block in self.blocks:
-            h = block(h, mask, kind=kind)
+            h = block(h, block_mask, kind=kind)
 
         horizon, aux = self.heads(h)
         return ModelOutput(horizon=horizon, aux=aux)

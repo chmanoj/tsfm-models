@@ -163,13 +163,18 @@ class SanitySpec:
     horizon: int = 32
     n_channels: int = 4
     channels_distribution: Tuple[int, ...] = ()
+    mix_cases: Tuple[str, ...] = ()   # used when case == "mixed" (empty -> all cases)
     n_series: int = 64
     noise_frac: float = 0.1
     seed: int = 0
 
     def __post_init__(self) -> None:
-        if self.case not in _GENERATORS:
-            raise ValueError(f"unknown sanity case {self.case!r}; pick from {SANITY_CASES}")
+        if self.case != "mixed" and self.case not in _GENERATORS:
+            raise ValueError(f"unknown sanity case {self.case!r}; pick from {SANITY_CASES} or 'mixed'")
+        self.mix_cases = tuple(self.mix_cases) or (SANITY_CASES if self.case == "mixed" else ())
+        for c in self.mix_cases:
+            if c not in _GENERATORS:
+                raise ValueError(f"unknown sanity case {c!r} in mix_cases")
         if not self.season_lengths:
             raise ValueError("season_lengths must be non-empty")
         if self.horizon >= self.series_len:
@@ -189,9 +194,17 @@ class SanitySpec:
             horizon=d.horizon,
             n_channels=d.n_channels,
             channels_distribution=tuple(d.channels_distribution),
+            mix_cases=tuple(getattr(d, "mix_cases", ()) or ()),
             n_series=d.n_series,
             seed=cfg.run.seed,
         )
+
+    def case_of(self, idx: int) -> str:
+        """The case for series ``idx`` — round-robin over ``mix_cases`` when
+        ``case == 'mixed'`` (balanced), else the single configured case."""
+        if self.case == "mixed":
+            return self.mix_cases[idx % len(self.mix_cases)]
+        return self.case
 
     def channels_of(self, rng) -> int:
         """Per-sample channel count: drawn from ``channels_distribution`` when set
@@ -211,7 +224,7 @@ class SanitySpec:
         declared to MASE is ``seasons[nf]`` (the first target channel)."""
         rng = np.random.default_rng((self.seed, idx))
         C = self.channels_of(rng)
-        data, nf, nt, seasons = _GENERATORS[self.case](
+        data, nf, nt, seasons = _GENERATORS[self.case_of(idx)](
             rng, self.series_len, C, self.noise_frac, self.season_lengths
         )
         return (np.ascontiguousarray(data, dtype=np.float64), int(nf), int(nt),
