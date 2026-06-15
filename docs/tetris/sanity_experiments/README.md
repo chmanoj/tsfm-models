@@ -21,7 +21,7 @@ and to *beat* it where there's learnable structure under the noise.
 | [shared_factor](#shared_factor) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 6000 | 6m48s | **0.629** | 0.951 | **0.66** | ✅ beats naive |
 | [features_target](#features_target) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 6000 | 7m21s | **0.717** | 0.854 | **0.84** | ✅ beats naive |
 | [kff_driver](#kff_driver) | 64 / 3 / 4, 2.06M | CPU (4 thr) | 2000 | 2m20s | **0.338** | 1.043 | **0.32** | ✅ KFF needed |
-| all cases mixed | — | — | — | — | — | — | — | pending |
+| [mixed (all cases)](#mixed-all-cases) | 64 / 3 / 4, 2.06M | **CUDA RTX 3070, compiled** | 12000 | 25m50s | **0.625** | 0.938 | **0.67** | ✅ beats naive |
 
 For **kff_driver** the headline is the KFF vs past-only contrast (same model): KFF-on
 MASE **0.338** vs past-only **0.789** — the known-future covariate cuts error ~57%.
@@ -193,3 +193,40 @@ visual demonstration that the architecture both *needs* and *uses* known-future
 covariates. 2000 steps suffices here.
 
 ![kff_driver](plots/kff_driver.png)
+
+---
+
+## mixed (all cases)
+
+The v1 capstone: **one model learns all five cases at once**. Each series is drawn
+round-robin from `{sine_univariate, multivariate_independent, shared_factor,
+features_target, kff_driver}` (16 each of 80), with per-sample varying frequencies
+`[12,24,48]`, varying channel counts `[2,6]`, and known-future features revealed
+(KFF) in training + eval. This is also the first **real CUDA run** — the D14 path:
+FlexAttention + `torch.compile` on an RTX 3070 (no shortcuts).
+
+```bash
+# on the GPU box (CUDA): flips backend to Flex + torch.compile
+uv run python -m tetris.train.sanity_run configs/sanity_mixed.yaml --compile --n-plot 6
+```
+
+Result: model MASE 4.70 (random) → **0.625**, beating seasonal naive (0.938),
+skill **0.67**, across all five case types simultaneously (183 channel-scores).
+12000 steps in 25m50s (7.74 steps/s). The 6-sample plot spans the variety — clean
+sines, multivariate, features→target, and the KFF case (blue **model (KFF)** tracks
+the random-walk driver while green **model (past-only)** drifts).
+
+Notes (observations + hypotheses, not yet verified):
+1. **Mid-train MASE isn't logged under `--compile`** (fact): the eager B=1 eval would
+   recompile per item, so we skip it; base/final MASE bracket the run. Fixable by
+   marking `R`/`n_var` dynamic in `evaluate_mase`.
+2. **GPU slower per step than the Mac CPU here** (observed: 7.74 vs ~14 steps/s).
+   *Hypothesis* — at this tiny size (d=64, B=4, L=256) kernel-launch + compile
+   overhead likely dominate and the tensors are too small to use the GPU; we expect
+   the GPU to win at foundation scale. **Not profiled — a hypothesis.**
+3. **Loss plateaus ~step 2.5–3k then oscillates 0.26–0.47** (observed). *Hypothesis*
+   — 12k steps is more than this overfit pool needs and the swing is batch-composition
+   variance (B=4 mixing different cases/channels/freqs). **Not confirmed as
+   over-training — a hypothesis;** could also be LR/optimization noise.
+
+![mixed (all cases)](plots/mixed.png)
