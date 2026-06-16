@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import ceil
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -37,6 +37,11 @@ class SamplerParams:
     # "bounded only by L_pack" (the existing per-channel budget) so direct-construction
     # unit tests are unchanged. Never an off-switch — it is always a real budget.
     max_query_tokens: int = 1 << 30
+    # D13 phase-2 ``auto_from_test_configs``: when set (non-empty), the horizon p is
+    # drawn from this empirical set of GIFT-Eval test prediction-lengths (clamped to
+    # the series + token budget) instead of the broad log-uniform-within-band default,
+    # so phase-2 training crops match the test horizon marginal. None -> broad default.
+    crop_horizons: Optional[Tuple[int, ...]] = None
 
     def __post_init__(self) -> None:
         assert self.p_out in PATCH, f"p_out {self.p_out} must be in the patch vocabulary {PATCH}"
@@ -65,11 +70,19 @@ def sample_window(n_features: int, n_targets: int, t_raw: int, params: SamplerPa
     max_q_by_cap = max(1, params.max_query_tokens // max(1, n_horizon_channels))
     q_tok_max = max(1, min(params.q_tok_max, max_q_by_budget, max_q_by_series, max_q_by_cap))
 
-    q_tok = int(rng.integers(1, q_tok_max + 1))
-    # variable-p within the chosen query-token band (D6): p in ((q_tok-1)·P, q_tok·P]
-    p_hi = min(q_tok * params.p_out, t_raw - 1)
-    p_lo = min((q_tok - 1) * params.p_out + 1, p_hi)
-    p = int(rng.integers(p_lo, p_hi + 1))
+    if params.crop_horizons:
+        # D13 phase-2: draw a test-matched horizon, clamp to series + token budget.
+        # The budget cap (q_tok_max·P_out) bounds the per-pass horizon exactly like
+        # training always does — eval still rolls out the full test horizon (G3.1).
+        p_target = int(params.crop_horizons[rng.integers(0, len(params.crop_horizons))])
+        p = max(1, min(p_target, t_raw - 1, q_tok_max * params.p_out))
+        q_tok = ceil(p / params.p_out)
+    else:
+        q_tok = int(rng.integers(1, q_tok_max + 1))
+        # variable-p within the chosen query-token band (D6): p in ((q_tok-1)·P, q_tok·P]
+        p_hi = min(q_tok * params.p_out, t_raw - 1)
+        p_lo = min((q_tok - 1) * params.p_out + 1, p_hi)
+        p = int(rng.integers(p_lo, p_hi + 1))
     assert ceil(p / params.p_out) == q_tok
 
     Q = n_targets * q_tok

@@ -100,6 +100,20 @@ def build_loader(cfg, *, rank: int = 0, world_size: int = 1):
         from .gifteval_overfit_loader import GiftEvalTestOverfitLoader
 
         return GiftEvalTestOverfitLoader.from_cfg(cfg, rank=rank, world_size=world_size)
+    if name == "gifteval_train":
+        # G5: the real GIFT-Eval *train* split (D13 corpus component B), streamed
+        # live (no materialization) via iter_train_items. Lazy/network — needs the
+        # gift_eval extras + data. Honest in-distribution gold (never the test split).
+        from .gifteval_train_loader import GiftEvalTrainLoader
+
+        return GiftEvalTrainLoader.from_cfg(cfg, rank=rank, world_size=world_size)
+    if name == "curriculum":
+        # G5: progress-conditioned weighted mixture over component loaders
+        # (synthetic / pretrain / GIFT-Eval train), annealed at phase2_start toward
+        # the train split (decision-log D13 two-phase schedule).
+        from .curriculum import CurriculumLoader
+
+        return CurriculumLoader.from_cfg(cfg, rank=rank, world_size=world_size)
     raise NotImplementedError(
         f"training loader {name!r} unknown; GIFT-Eval is record-only — use build_eval_loader"
     )

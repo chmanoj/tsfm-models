@@ -107,6 +107,13 @@ class DataCfg:
     # error) is skipped, not fabricated (no hardcoded applicability list to drift from
     # the benchmark).
     terms: List[str] = field(default_factory=lambda: ["short", "medium", "long"])
+    # --- GIFT-Eval train-split loader (G5, `gifteval_train`) ------------------
+    # Term whose train split to read (empty -> first of `terms`). `short` carves
+    # out the smallest test window, leaving the largest train split. The 3 terms
+    # share the same underlying series; the term only sets the train/test boundary.
+    train_term: str = ""
+    # Per-config cap on train series (-1 -> all). Caps the live stream for smokes.
+    train_max_series_per_config: int = -1
     # --- streaming-from-disk corpus (G4) -------------------------------------
     # Root directory of a materialized Arrow-IPC shard corpus (manifest.json +
     # index.arrow + shard-*.arrow), read by the `streaming` loader. Built once,
@@ -117,6 +124,51 @@ class DataCfg:
     # Cycle the corpus indefinitely (pretrain-style unbounded stream; the run stops
     # at `steps`). False -> one pass then StopIteration (finite, like StandIn).
     shard_cycle: bool = True
+
+
+@dataclass
+class SourceCfg:
+    """One component source of the G5 curriculum (decision-log D13 corpus part).
+
+    Each source is an independent rank-sharded loader built via ``build_loader``
+    with ``loader``/``shard_root`` overlaid on the run's ``data`` block. Its mixture
+    weight in phase *p* is ``multiplier_p × max(1, n_series)^alpha`` (D13: manual
+    multiplier × size^α), so ``multiplier_*`` = 0 removes the source in that phase
+    (mass renormalized over survivors). ``n_series`` = the size term (0 → read from
+    the streaming corpus manifest, else 1)."""
+
+    name: str = ""
+    loader: str = "streaming"          # streaming | gifteval_train | standin_pretrain | ...
+    shard_root: str = ""               # for the streaming loader (a materialized corpus)
+    multiplier_phase1: float = 1.0     # D13 phase 1 (broad pretrain: A+C+D, B natural)
+    multiplier_phase2: float = 1.0     # D13 phase 2 (anneal: upweight B = train split)
+    n_series: int = 0                  # size^α term (0 → manifest n_series, else 1)
+
+
+@dataclass
+class CurriculumCfg:
+    """G5 curriculum scheduler (decision-log D13 two-phase, temperature-balanced).
+
+    A progress-conditioned weighted mixture over :class:`SourceCfg` loaders. Progress
+    = items pulled / ``total_items``. Phase 1 (broad) holds until ``phase2_start``;
+    over ``[phase2_start, 1]`` the per-source multiplier **anneals** linearly from
+    ``multiplier_phase1`` to ``multiplier_phase2`` (D13 anneal toward the train
+    split). Mixture weight per source = ``(multiplier × size^alpha) ** (1/temperature)``,
+    renormalized; ``temperature`` > 1 flattens the mixture so rare sources aren't
+    starved (D13 temperature balancing). ``phase2_crop_distribution`` switches the
+    crop sampler to test-matched marginals derived from the 97-config table at
+    ``phase2_start`` (D13 ``auto_from_test_configs``)."""
+
+    sources: List[SourceCfg] = field(default_factory=list)
+    total_items: int = 1_000_000      # schedule horizon (progress denominator)
+    phase2_start: float = 0.8         # fraction of total_items where the anneal begins
+    alpha: float = 0.4                # size^α exponent (D13: 0.3–0.5)
+    temperature: float = 1.0          # >1 flattens the source mixture (freq/source balancing)
+    # D13 phase-2 crop marginals: none | auto_from_test_configs (test-matched horizons).
+    phase2_crop_distribution: str = "none"
+    # Manual override for the phase-2 horizon set (D13 allows it). Empty + the
+    # auto distribution -> derived from the downloaded 97-config test table.
+    phase2_crop_horizons: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -196,6 +248,7 @@ class Config:
     distributed: DistributedCfg = field(default_factory=DistributedCfg)
     model: ModelCfg = field(default_factory=ModelCfg)
     data: DataCfg = field(default_factory=DataCfg)
+    curriculum: CurriculumCfg = field(default_factory=CurriculumCfg)
     packing: PackingCfg = field(default_factory=PackingCfg)
     norm: NormCfg = field(default_factory=NormCfg)
     loss: LossCfg = field(default_factory=LossCfg)
@@ -239,6 +292,27 @@ class Config:
             )
         if not self.data.terms or any(t not in ("short", "medium", "long") for t in self.data.terms):
             raise ValueError(f"data.terms must be a non-empty subset of short|medium|long; got {self.data.terms}")
+        if self.data.loader == "curriculum":
+            c = self.curriculum
+            if not c.sources:
+                raise ValueError("curriculum loader needs curriculum.sources (>=1 SourceCfg)")
+            if c.total_items < 1:
+                raise ValueError("curriculum.total_items must be >= 1")
+            if not (0.0 <= c.phase2_start <= 1.0):
+                raise ValueError("curriculum.phase2_start must be in [0, 1]")
+            if c.alpha < 0:
+                raise ValueError("curriculum.alpha must be >= 0")
+            if c.temperature <= 0:
+                raise ValueError("curriculum.temperature must be > 0")
+            if c.phase2_crop_distribution not in ("none", "auto_from_test_configs"):
+                raise ValueError(
+                    f"unknown curriculum.phase2_crop_distribution={c.phase2_crop_distribution!r}")
+            names = [s.name for s in c.sources]
+            if len(set(names)) != len(names) or any(not n for n in names):
+                raise ValueError(f"curriculum.sources need unique non-empty names; got {names}")
+            for p in ("phase1", "phase2"):
+                if all(getattr(s, f"multiplier_{p}") <= 0 for s in c.sources):
+                    raise ValueError(f"curriculum {p}: at least one source multiplier must be > 0")
         if self.tracking.backend not in ("wandb", "none"):
             raise ValueError(f"unknown tracking.backend={self.tracking.backend!r}")
         if self.tracking.mode not in ("auto", "online", "offline", "disabled"):

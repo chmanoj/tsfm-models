@@ -245,6 +245,47 @@ def iter_train_items(
             yield item
 
 
+def auto_from_test_configs(
+    cfg=None,
+    *,
+    local_dir: str = "",
+    configs: Optional[List[str]] = None,
+    terms: Optional[Sequence[str]] = None,
+) -> tuple:
+    """Derive the GIFT-Eval **test horizon marginal** for D13 phase-2 crop matching.
+
+    Returns the multiset (as a tuple) of ``prediction_length`` over every applicable
+    ``(config, term)`` in the downloaded table — so sampling a horizon from it
+    reproduces the test marginal (short/medium/long contribute ×1/10/15 lengths,
+    weighted by how many configs support each term). A non-applicable ``(config,
+    term)`` (the dataset is missing the term subtree, or gluonts errors) is skipped,
+    mirroring the eval/leaderboard path — no hardcoded applicability list. Lazy/
+    network: needs the ``gift_eval`` extras + a populated tree; never run in CI.
+
+    ``cfg`` (optional) supplies ``data.local_dir``/``data.terms`` defaults; explicit
+    kwargs win.
+    """
+    if cfg is not None:
+        local_dir = local_dir or (cfg.data.local_dir or "")
+        if terms is None:
+            terms = tuple(cfg.data.terms)
+    terms = tuple(terms) if terms is not None else ("short", "medium", "long")
+    local_dir = _resolve_local_dir(local_dir)
+    names = configs if configs is not None else _list_configs(local_dir)
+    horizons: List[int] = []
+    for name in names:  # pragma: no cover - requires real data
+        for term in terms:
+            try:
+                ds = _make_dataset(name, term, local_dir)
+                p = int(ds.prediction_length)
+            except Exception as e:
+                log.info("auto_from_test_configs skip (%s/%s): %s", name, term, e)
+                continue
+            if p >= 1:
+                horizons.append(p)
+    return tuple(horizons)
+
+
 def list_configs(local_dir: str = "") -> List[str]:
     """Public: enumerate the GIFT-Eval config names present under the storage root."""
     return _list_configs(_resolve_local_dir(local_dir))

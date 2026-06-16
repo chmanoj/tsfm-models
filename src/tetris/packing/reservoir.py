@@ -31,6 +31,7 @@ size. Full re-shard at a *different* world size is S13.
 from __future__ import annotations
 
 import copy
+import dataclasses
 from typing import Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -49,6 +50,39 @@ Entry = Tuple[Item, SegmentSpec]
 Buffer = List[Entry]
 
 
+def _build_crop_schedule(cfg, base_params: SamplerParams):
+    """G5 D13 phase-2 crop sampler (``auto_from_test_configs``).
+
+    Returns ``(schedule, total)`` where ``schedule(frac) -> SamplerParams`` switches
+    from the broad ``base_params`` to a **test-matched** variant (``crop_horizons``
+    set to the GIFT-Eval test prediction-length marginal) once ``frac`` reaches
+    ``curriculum.phase2_start``. Off (``(None, 0)``) unless the curriculum loader is
+    active with ``phase2_crop_distribution == auto_from_test_configs`` — so every
+    other path keeps the static sampler. Horizons come from
+    ``curriculum.phase2_crop_horizons`` (manual override, D13 allows it) else are
+    derived from the downloaded test table (lazy/network)."""
+    if cfg.data.loader != "curriculum":
+        return None, 0
+    c = cfg.curriculum
+    if c.phase2_crop_distribution != "auto_from_test_configs":
+        return None, 0
+    horizons = tuple(int(h) for h in c.phase2_crop_horizons)
+    if not horizons:
+        from ..data.gifteval_download import auto_from_test_configs
+        horizons = auto_from_test_configs(cfg)
+    if not horizons:
+        raise ValueError(
+            "curriculum.phase2_crop_distribution=auto_from_test_configs derived no "
+            "horizons; set curriculum.phase2_crop_horizons or check the download.")
+    test_params = dataclasses.replace(base_params, crop_horizons=horizons)
+    phase2_start = float(c.phase2_start)
+
+    def schedule(frac: float) -> SamplerParams:
+        return test_params if frac >= phase2_start else base_params
+
+    return schedule, int(c.total_items)
+
+
 class StreamingReservoir:
     """Reservoir + best-fit-decreasing + cost-bucketing over a base loader (D9.3)."""
 
@@ -65,9 +99,18 @@ class StreamingReservoir:
         tail_tolerance: float = 0.05,
         seed: int = 0,
         rank: int = 0,
+        crop_schedule=None,
+        crop_total: int = 0,
     ) -> None:
         self.loader = loader
         self.params = params
+        # G5 D13 phase-2: optional progress-keyed crop sampler. ``crop_schedule`` is
+        # a callable ``frac -> SamplerParams`` consulted per pulled item with
+        # ``frac = items_pulled / crop_total``; None -> the static ``params`` (every
+        # existing path unchanged). ``items_pulled`` advances in lockstep with the
+        # curriculum loader's progress, so source mix and crop marginals share a clock.
+        self._crop_schedule = crop_schedule
+        self._crop_total = int(crop_total)
         self.l_pack = int(l_pack)
         self.p_out = int(p_out)
         self.B = int(buffers_per_step)
@@ -95,6 +138,7 @@ class StreamingReservoir:
             kff_reveal_prob=float(getattr(cfg.data, "kff_reveal_prob", 0.0)),
             max_query_tokens=cfg.packing.max_query_tokens,
         )
+        crop_schedule, crop_total = _build_crop_schedule(cfg, params)
         return cls(
             loader,
             params,
@@ -106,6 +150,8 @@ class StreamingReservoir:
             tail_tolerance=cfg.packing.tail_tolerance,
             seed=cfg.run.seed,
             rank=rank,
+            crop_schedule=crop_schedule,
+            crop_total=crop_total,
         )
 
     # --- iteration -------------------------------------------------------------
@@ -145,7 +191,11 @@ class StreamingReservoir:
                 break
             self._items_pulled += 1
             data, nf, nt = item
-            spec = sample_window(nf, nt, int(data.shape[1]), self.params, self._rng)
+            params = self.params
+            if self._crop_schedule is not None:
+                frac = min(1.0, self._items_pulled / max(1, self._crop_total))
+                params = self._crop_schedule(frac)
+            spec = sample_window(nf, nt, int(data.shape[1]), params, self._rng)
             self._reservoir.append((item, spec))
 
     def _form_one_buffer(self) -> Buffer:

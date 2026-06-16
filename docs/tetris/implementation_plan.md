@@ -618,6 +618,75 @@ frozen `Item`.
 
 ---
 
+**GIFT-Eval G5 reconciliation (pretrain + train-split + curriculum — pinned, do not re-flag):**
+G5 stands up the **curriculum data path** (decision-log **D13** two-phase schedule) and a run. Preconditions
+G2 + G4 met. Frozen seams (`pack`/`assemble`/`window_sampler` signature) untouched; the one reservoir change is
+**strictly additive + default-off** (every pre-G5 path is byte-identical — the 146→170 test delta is all new
+files). **Session decisions (maintainer, asked at start):** (1) pretrain = **reuse the existing ~1 GB / 67-sub-dataset
+slice** (downloadability was already proven in G4, so this was a budget call, not a feasibility one); (2) curriculum
+mechanism = **full D13 phase-2 incl. `auto_from_test_configs`** crop marginals; (3) the train split is served by a
+**live loader** (the maintainer chose this over materializing train shards — it resolves the only cross-doc
+ambiguity, `gifteval_G5.md` point 2 "live `GiftEvalTrainLoader`" vs the kickoff prompt's "train shards through the
+one streaming loader", **toward the live loader**); (4) the **train split is included** in this session's run.
+
+- **(A) Live `GiftEvalTrainLoader` (factory key `gifteval_train`, `data/gifteval_train_loader.py`).** D13 corpus
+  component **B** (the GIFT-Eval `train` split = `Dataset.training_dataset`, legal in-distribution gold; Moirai-2.0
+  precedent) streamed **live** over `iter_train_items` (G2) — no materialization — yielding the frozen `Item`,
+  rank-sharded by the iterator itself (O6, identical round-robin to every other loader) and **cycled** (finite split,
+  run stops at `steps`). Distinct from the G3 `gifteval_test_overfit` loader (that merges the *test* horizon back in
+  — a memorization probe, **not** zero-shot); this reads the genuine train split and never touches test data. Knobs:
+  `data.train_term` (empty → first of `terms`; `short` carves the smallest test window → largest train split) and
+  `data.train_max_series_per_config` (-1 = all).
+- **(B) `CurriculumLoader` (factory key `curriculum`, `data/curriculum.py`).** D13 two-phase schedule as a
+  progress-annealed **weighted mixture over component loaders** (each built by `build_loader` on a per-source cfg
+  override, so any source type — `streaming` synthetic/pretrain corpora, the live `gifteval_train` — plugs in). Per
+  source the mixture weight = `(multiplier × max(1,size)^alpha) ** (1/temperature)`, renormalized over sources with a
+  positive multiplier (D13: manual multiplier × size^α; `multiplier`=0 removes a source and its mass redistributes;
+  `temperature`>1 flattens so the small train source isn't starved). **Phase 1** (broad pretrain, A+C+D with B natural)
+  holds `multiplier_phase1` until `phase2_start` of `total_items`; over `[phase2_start, 1]` each multiplier **anneals
+  linearly** to `multiplier_phase2` (synthetic fades, pretrain steady, **B = train split upweighted** — the D13 anneal
+  target). **Progress** = the loader's own yield counter / `total_items`; it advances in lockstep with the reservoir's
+  `items_pulled` cursor (one pull per yield), so the source mix and the crop schedule (C) read the **same clock**
+  without a shared callback. Per-rank mixture RNG is seed+rank offset (component loaders already shard content
+  disjointly).
+- **(C) `auto_from_test_configs` crop marginals (D13 phase-2 crop half).** `SamplerParams.crop_horizons` (additive,
+  default `None` → the broad log-uniform-within-band sampler is unchanged): when set, `sample_window` draws the horizon
+  `p` from the empirical GIFT-Eval test prediction-length set, clamped to the series + the token budget (the same
+  per-pass bound training always uses; eval still rolls out the full horizon, G3.1). `StreamingReservoir` gains an
+  **optional progress-keyed `crop_schedule`** (`frac → SamplerParams`, `frac = items_pulled / crop_total`); `from_cfg`
+  builds it **only** when the curriculum loader is active with `phase2_crop_distribution=auto_from_test_configs`,
+  switching from broad to test-matched at `phase2_start` (default-off everywhere else). Horizons come from
+  `curriculum.phase2_crop_horizons` (manual override, D13-sanctioned) else are derived from the downloaded 97-config
+  table by `gifteval_download.auto_from_test_configs` (lazy/network; per-`(config,term)` `prediction_length`,
+  non-applicable pairs skipped like the eval path).
+- **Honest divergences from D13 (recorded, not silent):** (i) the prompt's "synthetic-heavy → blend pretrain → shift
+  train" 3-stage framing is realized as a **2-point linear anneal over 3 sources** (synthetic+pretrain both active from
+  the start; synthetic fades, train grows) rather than literal sequential sub-stages — captures the intent, simpler to
+  reason about. (ii) **Temperature is applied at source granularity** (`1/temperature` on the source mixture), **not
+  per-frequency within a source** — the live train/pretrain streams read in dataset order; per-frequency
+  temperature-balancing **within** a source is a **follow-up** (needs a freq-keyed reweighting layer). (iii) The
+  progress denominator is **items pulled vs `total_items`** (a config knob), not training steps (the loader can't see
+  steps) — tune `total_items` so `phase2_start` lands in the last ~20% of the run (~10 pulls/step at these settings).
+  (iv) This run **trains on the train split + test-matched crops → in-distribution-ish, NOT full zero-shot** (the
+  decision log's eventual target); kept honest in the config/docs.
+- **Config:** `SourceCfg` + `CurriculumCfg` (`config.py`, validated when `data.loader==curriculum`);
+  `configs/gifteval_curriculum.yaml` is the WSL run config (3 sources; needs **two separate** materialized corpora —
+  `corpus_synth` (`--n-synthetic 20000`) and `corpus_pretrain` (`--n-synthetic 0 --pretrain-root $GIFT_EVAL_PRETRAIN`)
+  — so synthetic and pretrain weight apart).
+- **Tests (24 new → `uv run pytest` 146→**170 passed, 2 skipped**):** `test_train_loader.py` (7; cycle/shard/term/
+  factory-key, `iter_train_items` monkeypatched — offline), `test_curriculum.py` (10; weight formula per phase, anneal,
+  zero-multiplier removal, temperature flattening, empirical-mix shift across phases, determinism, rank decorrelation,
+  two-corpus `build_loader` wiring, **reservoir-path train smoke** with the crop schedule), `test_crop_schedule.py`
+  (7; `crop_horizons` pin + series/budget clamp, broad-path unchanged, schedule gating off for non-curriculum/`none`,
+  switch at `phase2_start`, reservoir honors it by progress). The live `auto_from_test_configs` / `gifteval_train`
+  `from_cfg` data paths are the maintainer's WSL run (lazy `gift_eval`).
+- **Run = maintainer's (WSL RTX 3070), like G3.1/G4.** `overfit_run` → `run_training` → `StreamingReservoir.from_cfg`
+  (so the crop schedule is wired; the `build_loader` size-probe at the top is wrapped in try/except — `CurriculumLoader`
+  has no `__len__`, logged "size unknown", benign). Reproduction + (pending) results:
+  `docs/tetris/sanity_experiments/gifteval_wsl_runs.md`.
+
+---
+
 ## 1. Notation & global shape constants
 
 All per-batch shapes are static (D14: one compile graph; per-sample variability lives in tensor *contents*, never shapes).

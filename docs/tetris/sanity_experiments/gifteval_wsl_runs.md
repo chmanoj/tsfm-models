@@ -50,3 +50,45 @@ The first 2k diverged (loss 2.5→112, leaderboard NaN). Root causes, both fixed
 2. **No gradient clipping**: a single high-loss batch spiked the loss and (un-clipped) exploded the weights.
    Added `RunCfg.grad_clip` (default 0.0 = off, so G3.1/sanity/shakedown are unchanged) threaded into
    `train_step` via `clip_grad_norm_`; `streaming_run.yaml` sets `1.0`. Post-fix: stable, all-finite.
+
+## Run 3 — G5 curriculum (pretrain + train-split + curriculum) — *maintainer's to run*
+
+`configs/gifteval_curriculum.yaml` — reservoir-train on the `curriculum` loader (decision-log **D13** two-phase
+schedule) over **three sources**: varied synthetic (`corpus_synth`), the real ~1 GB GiftEvalPretrain slice
+(`corpus_pretrain`), and the **live GIFT-Eval `train` split** (`gifteval_train`). Phase 1 is synthetic-heavy +
+pretrain with the train split at natural weight; over `[phase2_start, 1]` synthetic fades, pretrain stays, the
+**train split is upweighted**, and the crop sampler switches to the **test-matched horizon marginal**
+(`auto_from_test_configs`). This trains on the train split + test-matched crops, so it is **in-distribution-ish,
+NOT full zero-shot** — keep the framing honest.
+
+| run | steps | leaderboard MASE | skill | finite | time |
+|---|---|---|---|---|---|
+| 2k (end-to-end check) | 2000 | — | — | — | *maintainer will run* |
+| 20k (curriculum) | 20000 | — | — | — | *maintainer will run* |
+
+Validated on Mac CPU through `uv run pytest` (the reservoir-path curriculum train smoke + crop-schedule switch run
+green offline). The GPU run is the maintainer's, like G3.1/G4.
+
+### One-time data prep on the box (TWO separate corpora so synthetic and pretrain weight apart)
+```bash
+ssh "$WSL" 'cd ~/tsfm-models && set -a && source .env && set +a && \
+  ~/.local/bin/uv run --no-sync python -m tetris.data.materialize \
+    --out outputs/corpus_synth --n-synthetic 20000'
+ssh "$WSL" 'cd ~/tsfm-models && set -a && source .env && set +a && \
+  ~/.local/bin/uv run --no-sync python -m tetris.data.materialize \
+    --out outputs/corpus_pretrain --n-synthetic 0 --pretrain-root "$GIFT_EVAL_PRETRAIN"'
+```
+### Run (2k end-to-end check, then the 20k curriculum run)
+```bash
+ssh "$WSL" 'cd ~/tsfm-models && set -a && source .env && set +a && \
+  nohup ~/.local/bin/uv run --no-sync python -m tetris.train.overfit_run \
+    configs/gifteval_curriculum.yaml --steps 2000 --eval-every 2000 \
+    --device cuda --n-plot 10 > /tmp/g5_2k.out 2>&1 & echo PID $!'
+ssh "$WSL" 'cd ~/tsfm-models && set -a && source .env && set +a && \
+  nohup ~/.local/bin/uv run --no-sync python -m tetris.train.overfit_run \
+    configs/gifteval_curriculum.yaml --steps 20000 --eval-every 5000 \
+    --device cuda --n-plot 10 > /tmp/g5_20k.out 2>&1 & echo PID $!'
+```
+**Tuning note:** `curriculum.total_items` is the schedule-progress **denominator** (items *pulled*, not steps).
+If the 2k check shows phase 2 never engages (or engages too early), scale `total_items` so `phase2_start` (0.8)
+lands in the last ~20% of the run — inspect the per-source mix in the train log against step count.

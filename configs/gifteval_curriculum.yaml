@@ -1,0 +1,95 @@
+# G5 curriculum run — train the `curriculum` loader (decision-log D13 two-phase
+# schedule) over three sources and score/plot on real GIFT-Eval test windows.
+#
+# Sources (D13 corpus parts):
+#   synthetic  = varied synthetic corpus  (C+D: KernelSynth-style + filler)
+#   pretrain   = real GiftEvalPretrain slice (A: the ~1 GB / 67-sub-dataset backbone)
+#   train      = GIFT-Eval `train` split, streamed live (B: in-distribution gold)
+#
+# Schedule: phase 1 (broad) holds the multiplier_phase1 mix until phase2_start of
+# `total_items`; over [phase2_start, 1] each multiplier anneals to multiplier_phase2
+# (synthetic fades, pretrain steady, the train split is upweighted), and the crop
+# sampler switches to the test-matched horizon marginal (auto_from_test_configs).
+# This is in-distribution-ish (it trains on the train split), NOT the full zero-shot
+# protocol — keep the framing honest.
+#
+# ── One-time data prep on the box (two SEPARATE corpora so they weight apart) ──
+#   uv run python -m tetris.data.materialize --out outputs/corpus_synth \
+#       --n-synthetic 20000
+#   uv run python -m tetris.data.materialize --out outputs/corpus_pretrain \
+#       --n-synthetic 0 --pretrain-root "$GIFT_EVAL_PRETRAIN"
+# ── Then (2k end-to-end GPU check, then the 20k run) ──
+#   uv run python -m tetris.train.overfit_run configs/gifteval_curriculum.yaml \
+#       --steps 2000  --eval-every 2000 --device cuda --n-plot 10
+#   uv run python -m tetris.train.overfit_run configs/gifteval_curriculum.yaml \
+#       --steps 20000 --eval-every 5000 --device cuda --n-plot 10
+
+run:
+  name: gifteval_curriculum
+  steps: 20000
+  seed: 0
+  grad_clip: 1.0           # diverse pretraining needs clipping (G4 lesson)
+
+backend:
+  device: auto             # cuda -> flex+compile ; mps/cpu -> sdpa+eager
+  compile: true
+
+model:
+  d_model: 224             # ~10.56M params at 6 layers (matches the G3.1/G4 runs)
+  n_layers: 6
+  n_heads: 4
+  out_patch: 16
+
+data:
+  loader: curriculum       # G5: the progress-annealed weighted source mixture
+  terms: [short, medium, long]   # GIFT-Eval eval terms (leaderboard/plots)
+  local_dir: ""            # empty -> $GIFT_EVAL (the box's .env) for the test split
+  train_term: short        # the train split whose carve-out is smallest (most data)
+  train_max_series_per_config: -1   # all train series (set a cap for a smoke)
+  shard_cycle: true        # component streaming corpora cycle (run stops at `steps`)
+
+curriculum:
+  # total_items is the schedule-progress DENOMINATOR (items pulled over the run).
+  # Tune so phase2_start lands in the last ~20% of the run; ~10 pulls/step here.
+  total_items: 200000
+  phase2_start: 0.8        # D13: last ~20% is the anneal
+  alpha: 0.4               # size^α exponent (D13: 0.3–0.5)
+  temperature: 1.5         # >1 flattens the mix so the small train source isn't starved
+  phase2_crop_distribution: auto_from_test_configs   # test-matched horizons in phase 2
+  # phase2_crop_horizons: []     # manual override; empty -> derived from the test table
+  sources:
+    - name: synthetic
+      loader: streaming
+      shard_root: outputs/corpus_synth
+      multiplier_phase1: 1.0       # synthetic-heavy at the start
+      multiplier_phase2: 0.2       # fades as the train split takes over
+      n_series: 0                  # 0 -> read from the corpus manifest
+    - name: pretrain
+      loader: streaming
+      shard_root: outputs/corpus_pretrain
+      multiplier_phase1: 1.0       # the steady real-data backbone (A)
+      multiplier_phase2: 0.8
+      n_series: 0
+    - name: train
+      loader: gifteval_train       # live GIFT-Eval train split (B)
+      multiplier_phase1: 0.3       # natural weight in phase 1
+      multiplier_phase2: 1.5       # upweighted in phase 2 (D13 anneal target)
+      n_series: 140000             # ~144k train series (D13); the size^α term
+
+packing:
+  L_pack: 512
+  max_query_tokens: 128    # per-pass horizon-token budget; eval rolls out the full horizon
+  buffers_per_step: 4      # conservative for the 8 GiB RTX 3070
+  reservoir: true
+  reservoir_k: 1000        # shuffle buffer over the mixed stream
+  scheduler_window: 64
+
+eval:
+  enabled: true
+  loader: gifteval_test    # real GIFT-Eval test windows -> leaderboard MASE + plots
+  items_per_config: 10
+
+tracking:
+  backend: wandb
+  project: tetris
+  mode: auto
