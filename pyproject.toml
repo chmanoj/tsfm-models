@@ -8,6 +8,11 @@ dependencies = [
     "torch>=2.5",
     "numpy>=1.26",
     "omegaconf>=2.3",
+    # On-disk streaming corpus (G4): Arrow-IPC shard format + zero-copy random
+    # access. Core infra — the synthetic corpus + `streaming` loader need it with
+    # no GIFT-Eval extra, so CI can read/write shards. The `gifteval` extra also
+    # pulls pyarrow transitively (datasets/gluonts); this pins it for the base.
+    "pyarrow>=14",
 ]
 
 [project.optional-dependencies]

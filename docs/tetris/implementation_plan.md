@@ -534,6 +534,74 @@ remaining G3.1 deliverable.
 
 ---
 
+**GIFT-Eval G4 reconciliation (streaming-from-disk + bigger synthetic corpus — pinned, do not re-flag):**
+G4 stops generating synthetic data on the fly: it **materializes** a varied corpus to disk **once**
+(seeded) and **streams it back with zero-copy random access**, source-agnostic so synthetic **and** real
+GiftEvalPretrain live in one format read by one loader. Validated on Mac CPU (20k synthetic corpus + a
+~1 GB / 67-sub-dataset GiftEvalPretrain slice). Precondition was G1 only; frozen seams (`pack`/`assemble`/
+`window_sampler`) untouched — the streaming loader is just a new `build_loader` factory key yielding the
+frozen `Item`.
+
+- **(A) Shard format = Arrow-IPC, flat values + zero-copy slice (the maintainer's call: real pyarrow
+  buffer slicing, NOT HF `datasets`).** `data/shards.py`. A corpus dir is `manifest.json` (version, per-source
+  counts, shard list, builder args) + `index.arrow` (columnar per-series index: `shard,row,C,nf,nt,length,
+  season_length,source,kind,item_id`) + `shard-NNNNN.arrow` (Arrow-IPC **file** format, schema
+  `{values: list<float32>}`, **one row per series = data flattened row-major [C,t]**). Reading series `g`:
+  index → shard → slice that shard's single contiguous `float32` values buffer between the series' list
+  offsets → copy out **only those floats** → reshape `[C,t]`. The whole point (per the prompt's clarified
+  ask): HF `datasets` deserializes the entire list-column per row; we instead memory-map the shard and touch
+  only the one series' bytes. Index is mmapped into compact numpy columns (no python list of items). int32
+  list offsets cap a shard at ~2.1e9 floats; the writer flushes well before that (`shard_size`=2500 series
+  by default; also a float-count guard). **NaN allowed** (D7 missing), **±inf rejected** at write.
+- **(B) Streaming loader = rank-sharded round-robin by global series index (O6).** `StreamingShardLoader`
+  yields the frozen `Item` for `range(rank, N, world_size)` — disjoint+covering across ranks, content keyed by
+  global index only, identical contract to `StandInPretrainLoader`/`SanityTrainLoader` (so the reservoir's
+  `items_pulled` cursor, DDP, and checkpoint re-shard keep working). `cycle=True` → unbounded pretrain-style
+  stream (the reservoir above does the shuffling, so on-disk order is read deterministically). Factory key
+  **`streaming`** in `build_loader`; new `DataCfg.shard_root` + `DataCfg.shard_cycle`. Chosen over
+  shard-file-per-rank (which would couple `world_size` to shard count and break the per-series cursor) and
+  over regenerate-from-seed (the whole G4 goal is to read fixed shards).
+- **(C) `pyarrow` is now a CORE dep, not the `gifteval` extra.** The shard format + synthetic streaming work
+  with no GIFT-Eval install, so CI must read/write shards → `pyarrow>=14` moved into `[project.dependencies]`
+  (`uv.lock` updated; the `gifteval` extra already pulled it transitively via datasets/gluonts).
+- **(D) Bigger/varied synthetic (`data/synthetic_corpus.py`), composing the S5.1 primitives.** Family mixture
+  (renormalized weights): `univariate` (one of trend/exp-trend/AR/random-walk/GBM/regime — records the
+  specific primitive as `kind`), `seasonal_known` + `multi_seasonal` (superposed **integer** calendar periods
+  4/7/12/24/48/96/144/168/336/52, so `season_length` is a real MASE-usable integer, unlike `S.gen_seasonal`'s
+  float periods), `intermittent`, `regime_jump`, `shared_factor` (multivariate latent-factor bank, lead-lag
+  inside, nt=2..8), `kff_driver` (NEW lead-lag known-future covariate, D11: nf=1..2 seasonal feature channels
+  drive the target via a *lagged* weighted sum). NaNs injected w.p. `nan_prob` via `S.inject_nans`. Each series
+  is keyed by `(seed, 0x5917, idx)` → deterministic and order-independent; per-series `season_length`/`nf`/`nt`/
+  `kind` carried into the index for MASE where this corpus is ever an eval source.
+- **(E) Real GiftEvalPretrain → same shards (`data/gifteval_pretrain.py`, shared reader).** The maintainer's
+  call: prove one format/reader serves synthetic **and** real pretrain (downloaded a ~1 GB, 67-sub-dataset
+  slice; not the full ~900 GB). Read each sub-dataset Arrow with **pyarrow directly** (lazy; `gluonts`
+  `get_seasonality` for `season_length`, degrading to -1 without the extra). gluonts encodes channels **three**
+  ways — `list<float>` (univariate), `fixed_size_list<list<float>>[C]` AND **plain `list<list<float>>`**
+  (variable channel count) — all decoded via `scalar.values` (float → 1 channel; nested → one sub-list per
+  channel). **Bug found+fixed+regression-tested:** the plain `list<list<float>>` feature column (8 sub-datasets,
+  e.g. `bull`/`cockatoo`) crashed the first converter (`setting an array element with a sequence`); covered now
+  by a download-free `test_pretrain_decodes_all_three_channel_encodings`. Channels stacked **features-first**
+  (`past_feat_dynamic_real` then `target`) to honor the frozen `Item`.
+- **(F) `materialize` CLI (`python -m tetris.data.materialize`)** writes synthetic (+ optional pretrain) into
+  one corpus. Verified on Mac CPU: **20k synthetic → 8 shards, 302 MB, ~8 s** (`outputs/corpus_synth`); **5k
+  synthetic + full pretrain → 171,436 series (166,436 real), 69 shards, 969 MB** (`outputs/corpus_mixed`, all
+  gitignored). Both train a few steps through the **reservoir path** off disk (finite, decreasing loss:
+  2574→5.7 on the mixed corpus) — full `streaming → window_sampler → reservoir → BFD → cost-bucket → pack →
+  train_step` works end-to-end from shards. `configs/streaming_synth.yaml` is the reservoir-path run config.
+- **Tests:** `tests/test_streaming.py` (16) — zero-copy round-trip exactness incl. NaN, frozen-Item contract,
+  ±inf rejection, rank-shard disjoint+covering (W=1..4), cycle unbounded, determinism, generator-family
+  variety + season metadata, multi-seasonal/KFF shapes, `build_loader` factory key, the **train smoke off
+  streamed shards**, the three-encoding decode regression, and an opportunistic real-pretrain round-trip
+  (skipped when no tree downloaded). **Mac suite: 145 passed, 2 skipped** (base venv: the 2 gluonts-gated
+  leaderboard tests skip; with the `gifteval` extra the same headline holds — those pass and the hf-absent
+  ImportError test skips instead). pyarrow-as-core means streaming runs in CI with no extra.
+- **G5 reuse (decided):** this is the **shared on-disk home** — G5 writes GIFT-Eval pretrain/`train` shards into
+  the same format (a `source` tag + per-series metadata already in the index) and streams them through this one
+  reader; only the synthetic + a pretrain-slice source are materialized/wired this session.
+
+---
+
 ## 1. Notation & global shape constants
 
 All per-batch shapes are static (D14: one compile graph; per-sample variability lives in tensor *contents*, never shapes).

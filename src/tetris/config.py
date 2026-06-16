@@ -103,6 +103,16 @@ class DataCfg:
     # error) is skipped, not fabricated (no hardcoded applicability list to drift from
     # the benchmark).
     terms: List[str] = field(default_factory=lambda: ["short", "medium", "long"])
+    # --- streaming-from-disk corpus (G4) -------------------------------------
+    # Root directory of a materialized Arrow-IPC shard corpus (manifest.json +
+    # index.arrow + shard-*.arrow), read by the `streaming` loader. Built once,
+    # offline, by `python -m tetris.data.materialize`. Source-agnostic: synthetic
+    # and GIFT-Eval pretrain write the same format. Rank-sharded round-robin by
+    # global series index (O6), so the reservoir/DDP/reshard seams are unchanged.
+    shard_root: str = ""
+    # Cycle the corpus indefinitely (pretrain-style unbounded stream; the run stops
+    # at `steps`). False -> one pass then StopIteration (finite, like StandIn).
+    shard_cycle: bool = True
 
 
 @dataclass

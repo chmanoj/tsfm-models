@@ -87,6 +87,13 @@ def build_loader(cfg, *, rank: int = 0, world_size: int = 1):
         from .sanity_loader import SanityTrainLoader
 
         return SanityTrainLoader.from_cfg(cfg, rank=rank, world_size=world_size)
+    if name == "streaming":
+        # G4: a materialized Arrow-IPC shard corpus (synthetic and/or GIFT-Eval
+        # pretrain) streamed from disk with zero-copy per-series random access,
+        # rank-sharded round-robin by global series index (O6).
+        from .shards import StreamingShardLoader
+
+        return StreamingShardLoader.from_cfg(cfg, rank=rank, world_size=world_size)
     if name == "gifteval_test_overfit":
         # G3: the real GIFT-Eval test split's contexts as training Items (Item-only;
         # in-distribution overfit). Lazy/network — needs the gift_eval extras + data.

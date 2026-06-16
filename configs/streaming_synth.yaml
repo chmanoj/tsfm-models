@@ -1,0 +1,48 @@
+# Streaming-from-disk synthetic corpus (G4). Materialize first, then train:
+#   python -m tetris.data.materialize --out outputs/corpus_synth --n-synthetic 20000
+#   # (optionally add: --pretrain-root ~/Projects/gifteval/pretrain)
+#   python -m tetris.train.loop configs/streaming_synth.yaml   # reservoir path
+# The `streaming` loader reads `data.shard_root` with zero-copy random access,
+# rank-sharded round-robin by global series index (O6).
+run: { name: streaming_synth, steps: 200, seed: 0 }
+backend:
+  device: auto            # cuda -> flex+compile ; mps/cpu -> sdpa+eager
+  compile: true           # honored on cuda; no-op on mps/cpu
+distributed:
+  enabled: false
+  parallel: ddp
+  process_group: gloo
+  shard_by: [node, rank]
+model:
+  d_model: 64
+  n_layers: 2
+  n_heads: 2
+  patch_vocab: [4, 8, 16, 64, 256, 512]
+  out_patch: 8
+  tier_alloc_per_channel: [16, 12, 8, 6, 4, 2]
+  encoder_cap: 0
+data:
+  loader: streaming                 # G4: read materialized Arrow-IPC shards
+  shard_root: outputs/corpus_synth  # where `tetris.data.materialize` wrote the corpus
+  shard_cycle: true                 # unbounded pretrain-style stream (run stops at `steps`)
+packing:
+  L_pack: 512
+  max_query_tokens: 128
+  buffers_per_step: 4
+  reservoir: true                   # S11 reservoir + best-fit-decreasing path
+  reservoir_k: 256
+  scheduler_window: 64
+  tail_tolerance: 0.05
+norm:
+  input_norm: anchored_arcsinh
+  loss_target: locally_reanchored
+  loss_space: arcsinh
+loss:
+  aux_weights: [0.2, 0.2, 0.2, 0.2, 0.1, 0.1]
+eval:
+  enabled: false                    # G4 is data-infra only; no eval/leaderboard here
+  loader: synthetic_eval
+checks:
+  assert_no_recompile: true
+  assert_pack_invariance: true
+  assert_aux_boundary: true

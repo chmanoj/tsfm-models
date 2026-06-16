@@ -3397,6 +3397,7 @@ source = { editable = "." }
 dependencies = [
     { name = "numpy" },
     { name = "omegaconf" },
+    { name = "pyarrow" },
     { name = "torch" },
 ]
 
@@ -3426,6 +3427,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'gifteval'", specifier = ">=0.20" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "omegaconf", specifier = ">=2.3" },
+    { name = "pyarrow", specifier = ">=14" },
     { name = "python-dotenv", marker = "extra == 'gifteval'", specifier = ">=1.0" },
     { name = "salesforce-gift-eval", marker = "extra == 'gifteval'", git = "https://github.com/SalesforceAIResearch/gift-eval.git" },
     { name = "torch", specifier = ">=2.5" },
