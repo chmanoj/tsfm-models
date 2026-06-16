@@ -89,6 +89,26 @@ def c2st_auc(A: np.ndarray, B: np.ndarray, *, n_folds: int = 5, seed: int = 0) -
     return auc_score(scores, y)
 
 
+def knn_c2st_auc(A: np.ndarray, B: np.ndarray, *, k: int = 15, seed: int = 0) -> float:
+    """A stronger (nonlinear) C2ST: leave-fold-out k-NN. Each point's score is the
+    fraction of its k nearest neighbours (among the *other* points) labelled 1. Picks
+    up separability a linear classifier misses, so it is the more honest (usually
+    higher) AUC — we report it to avoid flattering ourselves."""
+    A = np.asarray(A, dtype=np.float64); B = np.asarray(B, dtype=np.float64)
+    if len(A) < k + 1 or len(B) < k + 1:
+        return 0.5
+    X = np.concatenate([A, B], axis=0)
+    y = np.concatenate([np.zeros(len(A)), np.ones(len(B))])
+    mu, sd = X.mean(0), X.std(0) + 1e-8
+    X = (X - mu) / sd
+    with np.errstate(all="ignore"):  # Accelerate matmul warning (see _logreg_scores)
+        d2 = (X ** 2).sum(1)[:, None] + (X ** 2).sum(1)[None, :] - 2 * X @ X.T
+    np.fill_diagonal(d2, np.inf)
+    nn = np.argsort(d2, axis=1)[:, :k]
+    scores = y[nn].mean(axis=1)
+    return auc_score(scores, y)
+
+
 def ks_2samp(a: np.ndarray, b: np.ndarray) -> float:
     """Two-sample Kolmogorov–Smirnov statistic max|F_a − F_b| (numpy)."""
     a = np.sort(np.asarray(a, dtype=np.float64)); b = np.sort(np.asarray(b, dtype=np.float64))
@@ -169,20 +189,27 @@ def evaluate(real_feats: np.ndarray, named_synth: Dict[str, np.ndarray], *,
              seed: int = 0, floor: Optional[float] = None) -> QualityResult:
     """Compare each named synth feature set against the real-test feature set."""
     res = QualityResult(real_n=int(len(real_feats)), predictability_floor=floor)
+    dyn = list(F.DYNAMICS_IDX)
+    real_dyn = real_feats[:, dyn]
     for name, feats in named_synth.items():
         feats = np.asarray(feats, dtype=np.float64)
         res.families[name] = {
             "n": int(len(feats)),
-            "c2st_auc": c2st_auc(feats, real_feats, seed=seed),
-            "mmd": rbf_mmd(feats, real_feats),
+            # headline = the *dynamics* C2ST (length/scale excluded so it can't be
+            # gamed by superficial matching); full-feature + kNN reported alongside.
+            "c2st_dynamics": c2st_auc(feats[:, dyn], real_dyn, seed=seed),
+            "c2st_full": c2st_auc(feats, real_feats, seed=seed),
+            "c2st_knn_dynamics": knn_c2st_auc(feats[:, dyn], real_dyn, seed=seed),
+            "mmd": rbf_mmd(feats[:, dyn], real_dyn),
             "ks": per_feature_ks(feats, real_feats),
         }
-    # Verdict: two *relative* checks (robust to the absolute level) plus an honest
-    # absolute caveat. (1) targeted should be closer to the 0.5 null than general;
-    # (2) the pure-noise control should be the most separable family (sanity that the
-    # C2ST has discriminative power). The absolute AUC says how much overlap remains.
-    aucs = {n: v["c2st_auc"] for n, v in res.families.items()}
-    parts = [f"{n}:AUC={a:.3f}" for n, a in sorted(aucs.items(), key=lambda kv: kv[1])]
+    # Verdict on the *dynamics* C2ST. Two relative checks (robust to absolute level):
+    # (1) targeted closer to the 0.5 null than general; (2) the pure-noise control is
+    # the most separable family (the C2ST has discriminative power). Plus an honest
+    # absolute caveat — how far the best real family still is from indistinguishable.
+    aucs = {n: v["c2st_dynamics"] for n, v in res.families.items()}
+    parts = [f"{n}:dyn={aucs[n]:.3f}/knn={res.families[n]['c2st_knn_dynamics']:.3f}"
+             for n in sorted(aucs, key=aucs.get)]
     real = {n: a for n, a in aucs.items() if n != "noise"}
     rel_ok = True
     if "targeted" in aucs and "general" in aucs:
@@ -192,10 +219,11 @@ def evaluate(real_feats: np.ndarray, named_synth: Dict[str, np.ndarray], *,
     best = min(real.values()) if real else min(aucs.values())
     absolute = ("indistinguishable" if best < 0.6 else
                 "good overlap" if best < 0.8 else
-                "still separable (data-quality work remains for H2)")
+                "still separable — capture more real dynamics (not length/scale)")
     res.verdict = (("PASS(relative) — " if rel_ok else "REVIEW — ")
                    + " | ".join(parts)
-                   + f" || best real AUC={best:.3f} → {absolute} (0.5 = indistinguishable)")
+                   + f" || best targeted/general dynamics-AUC={best:.3f} → {absolute}"
+                   + " (0.5 = indistinguishable; dyn excludes length/scale)")
     return res
 
 
@@ -206,10 +234,13 @@ def format_report(res: QualityResult) -> str:
     if res.predictability_floor is not None:
         lines += [f"Noise-robust predictability floor (irreducible RMS / scale): "
                   f"**{res.predictability_floor:.3f}**", ""]
-    lines += ["## C2ST / MMD (lower AUC = closer to test; 0.5 = indistinguishable)", "",
-              "| family | n | C2ST AUC | RBF-MMD |", "|---|---|---|---|"]
-    for name, v in sorted(res.families.items(), key=lambda kv: kv[1]["c2st_auc"]):
-        lines.append(f"| {name} | {v['n']} | {v['c2st_auc']:.3f} | {v['mmd']:.4f} |")
+    lines += ["## C2ST / MMD (lower AUC = closer to test; 0.5 = indistinguishable). "
+              "Headline = **dynamics** AUC (length/scale excluded — not gameable).", "",
+              "| family | n | C2ST dyn | C2ST dyn (kNN) | C2ST full | RBF-MMD(dyn) |",
+              "|---|---|---|---|---|---|"]
+    for name, v in sorted(res.families.items(), key=lambda kv: kv[1]["c2st_dynamics"]):
+        lines.append(f"| {name} | {v['n']} | {v['c2st_dynamics']:.3f} | "
+                     f"{v['c2st_knn_dynamics']:.3f} | {v['c2st_full']:.3f} | {v['mmd']:.4f} |")
     lines += ["", "## Per-feature KS distance (the punch-list: what still separates)", "",
               "| feature | " + " | ".join(res.families) + " |",
               "|---|" + "---|" * len(res.families)]

@@ -690,7 +690,7 @@ one streaming loader", **toward the live loader**); (4) the **train split is inc
 **Synth-v2 H1 reconciliation (better synthetic corpus + Tier-1 quality harness — pinned, do not re-flag):**
 H1 builds a **measurably better** synthetic corpus in two tagged families + a training-free harness that
 decides whether it is better, on **one shared feature space**. Precondition G4 (shards/`synthetic_corpus`/
-`materialize`) + G5 (`auto_from_test_configs`, leaderboard). `uv run pytest` **170→187 passed, 2 skipped**
+`materialize`) + G5 (`auto_from_test_configs`, leaderboard). `uv run pytest` **170→188 passed, 2 skipped**
 (all new files + one additive seam change). **Session decisions (maintainer, asked at start):** (1) general =
 **multivariate-first** broad coverage, not a fixed recipe; (2) targeted matches the **full empirical data
 distribution**, not just freq/season/horizon/C metadata; (3) noise-robustness = **clean-horizon Path B** (below);
@@ -715,7 +715,12 @@ distractors, p≈0.3, ≤3 extra.
 - **(A) Shared feature battery (`data/features.py`).** One hand-rolled, numpy-only, NaN-robust feature vector per
   series (spectral entropy, ACF@1/diff, trend/seasonal strength, dominant-period frac, intermittency, log-scale,
   log-length, excess kurtosis, stationarity). Used by **all three** of {TestProfile, targeted generator, C2ST harness}
-  so "targeted matches test" ⇔ "C2ST can't separate them" on the *same* axes.
+  so "targeted matches test" ⇔ "C2ST can't separate them" on the *same* axes. **`season`-aware:** when the dataset
+  calendar period is known, `seasonal_strength` is measured at *that* period (not just the FFT-dominant one) — real
+  server/traffic traces are drift-dominated so the FFT period is the trend and the daily seasonality was otherwise
+  invisible. A **`DYNAMICS_FEATURES`** subset (excludes `log_length`/`log_scale`) is the harness's headline so the
+  metric **can't be gamed** by matching superficial series length/amplitude (the maintainer's "don't game the eval"
+  principle).
 - **(B) `synth_general` (`data/synthetic_v2.py`).** Multivariate **KernelSynth** (composed RBF/periodic/linear/RQ/
   white kernels → shared factor bank → channels; univariate = C=1) + **SDEs** (OU mean-reverting, GBM, jump-diffusion,
   vol-clustering) + the **noise-robust Path-B** family + structural-TS + the G4 multi-seasonal/intermittent/regime/
@@ -726,23 +731,31 @@ distractors, p≈0.3, ≤3 extra.
   (season/horizon/C) from the real **test** contexts — **aggregate stats only, never raw values, never per-series
   matching → no leakage** (D13 "match the distribution, not the values", extended from metadata to the full feature
   distribution). The targeted generator draws a group, samples length/season/C from its marginals, and produces a
-  **profile-conditioned mixture** (≈40% profile-rescaled draws from the diverse general families — for joint-manifold
-  coverage — else a parametric seasonal+trend+RBF-smoothed-noise synthesis tuned to the group's central features),
-  **rejection-sampled** on the key feature bands. `--from-test-configs`/subset overrides supported; the committed
-  profile is **gitignored** (rebuild/rsync as needed).
-- **(D) Tier-1 quality harness (`data/quality_harness.py`).** **C2ST** (k-fold logistic-regression ROC-AUC; null 0.5)
-  as the headline objective metric + per-feature **KS** punch-list + **RBF-MMD** + a **pure-noise control** + a
-  noise-robust **predictability floor**. Verdict is *relative* (targeted closer to test than general; noise the most
-  separable) with an honest *absolute* caveat. CLI `python -m tetris.data.quality_harness` writes a markdown/JSON report.
-- **Tier-1 result (Mac CPU, seed 0).** **targeted C2ST AUC 0.949 < general 0.966 < noise 0.997** — targeted is the
-  closest-to-test family and matches the structural axes (log_scale/trend/seasonal/kurtosis) best, but best real
-  AUC≈0.95 is **still separable**: the spectral/autocorrelation axes (sharp multi-harmonic periodicity of real
-  traffic/energy) and the length distribution are the **H2 data-quality levers**. Full report + the like-for-like
-  visual (`synth_targeted_vs_real.png`): `docs/tetris/sanity_experiments/synth_v2_quality.md`.
+  **profile-conditioned mixture**: ≈40% profile-rescaled draws from the diverse general families (joint-manifold
+  coverage — a single rigid family is trivially separable even with matched marginals), else a parametric synthesis
+  tuned to the group's central features with three regimes — **multi-harmonic / von-Mises sharp-peak seasonal**,
+  **RBF-smoothed-noise + trend**, and an **impulsive spike-train** (flat baseline + periodic sharp spikes + heavy-tail
+  outliers, triggered by high `excess_kurtosis` + low seasonal variance — the server/traffic-trace pattern, e.g.
+  `bitbrains_rnd/5T`, that smooth synthesis misses). **rejection-sampled** on the key feature bands.
+  `--from-test-configs`/subset overrides supported; the committed profile is **gitignored** (rebuild/rsync as needed).
+- **(D) Tier-1 quality harness (`data/quality_harness.py`).** **C2ST** on the **`DYNAMICS_FEATURES`** subset
+  (length/scale excluded → **not gameable**) as the headline + a stronger **kNN C2ST** (nonlinear; the honest, usually
+  higher number) + full-feature C2ST + per-feature **KS** punch-list + **RBF-MMD** + **pure-noise control** + a
+  noise-robust **predictability floor**. Verdict is *relative* (targeted closer to test than general; noise most
+  separable) with an honest *absolute* caveat. CLI writes a markdown/JSON report.
+- **Tier-1 result (Mac CPU, seed 0), after the harness-driven iteration:** **targeted dynamics-C2ST 0.914 < general
+  0.931 < noise 0.998** (kNN: targeted 0.974 / general 0.971) — targeted is the closest-to-test family on the
+  non-gameable metric and best matches trend/kurtosis/seasonal; best dynamics-AUC≈0.91 (kNN≈0.97) is **still separable**.
+  The iteration loop (read punch-list → capture *real dynamics*, never length): calendar-period seasonality, multi-
+  harmonic/sharp seasonal, the impulsive spike mode (matched `bitbrains_rnd/5T`), diversity mix. **Open H2 levers:**
+  fine autocorrelation/spectral shape (`acf1`/`acf_diff1`/`spectral_entropy`) — candidate for per-config parameter
+  fitting. Full report + the like-for-like visual (`synth_targeted_vs_real.png`):
+  `docs/tetris/sanity_experiments/synth_v2_quality.md`. **Principle (recorded): the C2ST is a diagnostic for real
+  dynamics, never a target to minimize by superficial means (length/scale) — that would game the eval.**
 - **`materialize` (`build_corpus_v2`, `--n-general/--n-targeted/--profile`)** writes both families (tagged
   `synth_general`/`synth_targeted`) to the v2 shard format; targeted needs a fitted `--profile`. The legacy G4
   `build_corpus` path is unchanged.
-- **Tests (17 new → `uv run pytest` 170→187 passed, 2 skipped):** `tests/test_synth_v2.py` — feature
+- **Tests (18 new → `uv run pytest` 170→188 passed, 2 skipped):** `tests/test_synth_v2.py` — feature
   determinism/finiteness/discrimination; fixed-window sampler (deterministic crop + unchanged random path);
   HintedItem→reservoir→**clean horizon GT** end-to-end; shard v2 round-trip + **v1 read-back compat**; KernelSynth-MV/
   SDE/noise-robust shapes + the clean-vs-noisy smoothness invariant; dilution; general-corpus tags/determinism;

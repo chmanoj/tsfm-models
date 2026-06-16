@@ -248,5 +248,17 @@ def test_ks_mmd_and_evaluate_verdict():
     assert Q.ks_2samp(real[:, 0], far[:, 0]) > Q.ks_2samp(real[:, 0], close[:, 0])
     assert Q.rbf_mmd(real, far) > Q.rbf_mmd(real, close)
     res = Q.evaluate(real, {"targeted": close, "general": far, "noise": far + 10}, seed=0)
-    assert res.families["targeted"]["c2st_auc"] < res.families["general"]["c2st_auc"]
-    assert "AUC=" in res.verdict
+    assert res.families["targeted"]["c2st_dynamics"] < res.families["general"]["c2st_dynamics"]
+    assert "c2st_knn_dynamics" in res.families["targeted"]
+    assert "dyn=" in res.verdict
+
+
+def test_knn_c2st_and_dynamics_subset():
+    rng = np.random.default_rng(0)
+    A, B = rng.normal(0, 1, (200, F.N_FEATURES)), rng.normal(0, 1, (200, F.N_FEATURES))
+    C = rng.normal(6, 1, (200, F.N_FEATURES))
+    assert abs(Q.knn_c2st_auc(A, B, seed=1) - 0.5) < 0.2
+    assert Q.knn_c2st_auc(A, C, seed=1) > 0.9
+    # dynamics subset excludes the superficial length/scale axes
+    assert "log_length" not in F.DYNAMICS_FEATURES and "log_scale" not in F.DYNAMICS_FEATURES
+    assert len(F.DYNAMICS_IDX) == F.N_FEATURES - 2

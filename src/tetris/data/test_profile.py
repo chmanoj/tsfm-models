@@ -173,10 +173,11 @@ def fit_from_gifteval(*, local_dir: str = "", terms=_TERMS, items_per_config: in
     for ev in iter_eval_items(local_dir, configs=configs, terms=tuple(terms),
                               items_per_config=items_per_config):
         data = ev.data_tensor.detach().cpu().numpy()
+        season = int(ev.season_length) if ev.season_length else 0
         records.append(FitRecord(
-            feats=F.channel_features(data),
+            feats=F.channel_features(data, season=season),
             freq=_config_name(ev.config_id),
-            season=int(ev.season_length) if ev.season_length else 0,
+            season=season,
             horizon=int(ev.y_true.shape[0]) if ev.y_true is not None else 0,
             n_channels=data.shape[0]))
     if not records:

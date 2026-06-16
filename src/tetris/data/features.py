@@ -38,6 +38,14 @@ FEATURE_NAMES: tuple[str, ...] = (
 )
 N_FEATURES = len(FEATURE_NAMES)
 
+# The *dynamics* (pattern) features — everything except the superficial extent/amplitude
+# axes (length, scale). The synth-quality verdict is judged on these so we cannot game
+# the C2ST by matching series length/scale (which teach the model no test *pattern*).
+# See the [[dont-game-synth-quality-metric]] principle.
+_SUPERFICIAL = ("log_scale", "log_length")
+DYNAMICS_FEATURES = tuple(n for n in FEATURE_NAMES if n not in _SUPERFICIAL)
+DYNAMICS_IDX = tuple(FEATURE_NAMES.index(n) for n in DYNAMICS_FEATURES)
+
 _EPS = 1e-8
 
 
@@ -132,8 +140,16 @@ def _excess_kurtosis(d: np.ndarray) -> float:
     return float(np.tanh(k / 10.0))  # squash heavy-tail outliers into (-1, 1)
 
 
-def series_features(x: Sequence[float]) -> np.ndarray:
-    """Feature vector (length :data:`N_FEATURES`, all finite) for one 1-D series."""
+def series_features(x: Sequence[float], season: int = 0) -> np.ndarray:
+    """Feature vector (length :data:`N_FEATURES`, all finite) for one 1-D series.
+
+    ``season`` (the dataset's calendar period, when known — e.g. 24 hourly, 288 for
+    5-min) makes ``seasonal_strength`` measure the strength at *that* period rather
+    than the FFT-dominant one. This matters: many real series (server/traffic traces)
+    are dominated by a slow drift, so the FFT-dominant period is the trend and the
+    real daily seasonality is invisible to a period-agnostic estimate — the strength
+    is then taken at the calendar period (max of the two, so a strong detected period
+    is never lost)."""
     raw = np.asarray(x, dtype=np.float64).ravel()
     fin = _finite(raw)
     n = raw.size
@@ -153,6 +169,8 @@ def series_features(x: Sequence[float]) -> np.ndarray:
     period = int(round(n * dom_frac)) if dom_frac > 0 else 0
     trend = _trend_strength(filled)
     seasonal = _seasonal_strength(filled, period)
+    if season and season >= 2:  # also measure at the known calendar period
+        seasonal = max(seasonal, _seasonal_strength(filled, int(season)))
 
     # intermittency: fraction of |x| below a small fraction of the series scale
     thr = 0.05 * (np.abs(fin).mean() + _EPS)
@@ -171,10 +189,11 @@ def series_features(x: Sequence[float]) -> np.ndarray:
     return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def channel_features(data: np.ndarray) -> np.ndarray:
-    """One feature row per channel of a ``[C, t]`` array → ``[C, N_FEATURES]``."""
+def channel_features(data: np.ndarray, season: int = 0) -> np.ndarray:
+    """One feature row per channel of a ``[C, t]`` array → ``[C, N_FEATURES]``.
+    ``season`` is the dataset calendar period (see :func:`series_features`)."""
     arr = np.atleast_2d(np.asarray(data))
-    return np.stack([series_features(arr[c]) for c in range(arr.shape[0])])
+    return np.stack([series_features(arr[c], season=season) for c in range(arr.shape[0])])
 
 
 def feature_matrix(series: Sequence[np.ndarray]) -> np.ndarray:

@@ -32,6 +32,47 @@ def _clip(v, lo, hi):
     return float(min(max(v, lo), hi))
 
 
+def _seasonal_component(rng, t: np.ndarray, m: int, seas_str: float) -> np.ndarray:
+    """Realistic seasonal shape at period ``m``: a multi-harmonic Fourier series, or
+    (for strongly seasonal groups) a sharp **von Mises** peak train — real GIFT-Eval
+    traffic/energy series have sharp, multi-harmonic daily cycles that a single
+    sinusoid can't reproduce (the spectral_entropy/acf gap in the Tier-1 punch-list)."""
+    phase = rng.uniform(0, 2 * np.pi)
+    w = 2 * np.pi * t / m
+    if seas_str > 0.4 and rng.random() < 0.6:
+        # von Mises bump train: sharp periodic peaks (higher κ ⇒ sharper)
+        kappa = float(rng.uniform(2.0, 8.0))
+        x = np.exp(kappa * (np.cos(w + phase) - 1.0))
+    else:
+        # Fourier series with 2–4 harmonics and decaying amplitudes
+        n_harm = int(rng.integers(2, 5))
+        x = np.zeros_like(t)
+        for h in range(1, n_harm + 1):
+            x += (rng.uniform(0.4, 1.0) / h) * np.sin(h * w + rng.uniform(0, 2 * np.pi))
+    return S._standardize(x)
+
+
+def _impulsive_channel(rng, n: int, m: int, kurt: float) -> np.ndarray:
+    """Flat baseline + periodic sharp spikes (at the calendar period and a sub-period)
+    + rare heavy-tail outliers — the server/traffic-trace pattern (high excess_kurtosis,
+    low seasonal-variance) that smooth seasonal synthesis misses (bitbrains_rnd/5T etc.).
+    """
+    x = rng.normal(0, 0.15, n)                       # near-flat baseline
+    periods = [m] if m and m >= 2 else []
+    if m and m // 6 >= 2 and rng.random() < 0.7:     # add a sub-period spike train
+        periods.append(int(m // rng.integers(4, 8)))
+    for p in periods:
+        amp = rng.uniform(2, 6)
+        for c in range(p, n, p):                     # spike once per period (jittered)
+            j = c + int(rng.integers(-p // 10 - 1, p // 10 + 1))
+            if 0 <= j < n:
+                x[j] += amp * rng.uniform(0.6, 1.4)
+    n_out = int(max(0, rng.normal(2 + 4 * kurt, 1)))  # rare huge outliers
+    for _ in range(n_out):
+        x[int(rng.integers(n))] += rng.uniform(6, 18) * rng.choice([-1.0, 1.0])
+    return S._standardize(x)
+
+
 def _targeted_channel(rng, n: int, m: int, center: dict) -> np.ndarray:
     """One channel guided by a group's central feature vector ``center`` (a
     name→value dict). Allocates variance to seasonal / trend / noise components so
@@ -45,7 +86,12 @@ def _targeted_channel(rng, n: int, m: int, center: dict) -> np.ndarray:
     kurt = _clip(center.get("excess_kurtosis", 0.0), -1, 1)
     scale = float(np.expm1(_clip(center.get("log_scale", 1.0), 0, 12))) + 1e-3
 
-    seasonal = (S._standardize(np.sin(2 * np.pi * t / m + rng.uniform(0, 2 * np.pi)))
+    # impulsive/spiky regime (heavy-tailed, low seasonal variance): flat baseline +
+    # periodic sharp spikes + outliers, not the smooth seasonal+trend+noise mix.
+    if kurt > 0.4 and seas_str < 0.3:
+        return scale * _impulsive_channel(rng, n, m, kurt) + rng.uniform(-50, 50)
+
+    seasonal = (_seasonal_component(rng, t, m, seas_str)
                 if m and m >= 2 and n > 2 * m else np.zeros(n))
     lin = S._standardize(t) if n > 1 else np.zeros(n)
     # heavy-tailed innovations when the group has fat-tailed diffs (Student-t echo)
