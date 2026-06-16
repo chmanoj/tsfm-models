@@ -21,6 +21,7 @@ run:
   name: streaming_run
   steps: 20000
   seed: 0
+  grad_clip: 1.0           # diverse streaming pretraining needs clipping (G4); 0 elsewhere
 
 backend:
   device: auto

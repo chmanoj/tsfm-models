@@ -88,6 +88,7 @@ def run_training(
         lb = train_step(
             forward, batch, basis, optimizer,
             aux_weights=cfg.loss.aux_weights, loss_space=cfg.norm.loss_space,
+            max_grad_norm=cfg.run.grad_clip,
         )
         losses.append(float(lb.total.detach()))
 

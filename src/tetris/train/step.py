@@ -57,6 +57,7 @@ def train_step(
     *,
     aux_weights: Sequence[float],
     loss_space: str = "arcsinh",
+    max_grad_norm: float = 0.0,
 ) -> LossBreakdown:
     """Run one optimization step; returns the loss breakdown (D6). The block mask is
     built eagerly here and passed in (hoisted out of the compiled forward)."""
@@ -64,5 +65,8 @@ def train_step(
     lb = compute_loss(out, batch, aux_weights=aux_weights, loss_space=loss_space)
     optimizer.zero_grad(set_to_none=True)
     lb.total.backward()
+    if max_grad_norm and max_grad_norm > 0:
+        torch.nn.utils.clip_grad_norm_(
+            [p for grp in optimizer.param_groups for p in grp["params"]], max_grad_norm)
     optimizer.step()
     return lb
