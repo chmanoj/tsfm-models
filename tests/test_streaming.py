@@ -143,6 +143,27 @@ def test_multi_seasonal_and_kff_shapes():
     assert data.shape[0] == nf + nt and nt == 1 and nf >= 1 and season > 0
 
 
+def test_synthetic_corpus_magnitude_is_fp32_safe():
+    """Regression: a fixed per-step exp rate made gen_exp_trend explode at long
+    lengths (~1e29 at n=4096), whose square overflows fp32 variance -> NaN/training
+    divergence (seen on the G4 2k GPU run). The whole corpus must stay fp32-safe."""
+    import numpy as np
+    from tetris.data import synthetic_corpus as SC
+
+    names, p = SC._family_picker(SC.DEFAULT_WEIGHTS)
+    gmax = 0.0
+    for idx in range(1500):
+        rng = np.random.default_rng((0, 0x5917, idx))
+        n = int(rng.integers(96, 4097))
+        fam = names[int(rng.choice(len(names), p=p))]
+        data, *_ = SC.gen_series(rng, n, fam)
+        a = np.abs(np.asarray(data, np.float64))
+        a = a[np.isfinite(a)]
+        if a.size:
+            gmax = max(gmax, float(a.max()))
+    assert gmax < 1e7, f"corpus magnitude {gmax:.2e} risks fp32 variance overflow"
+
+
 # --- train smoke off streamed shards ---------------------------------------
 
 def test_train_smoke_off_streamed_shards(tmp_path):

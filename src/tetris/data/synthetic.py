@@ -51,7 +51,12 @@ def gen_linear_trend(rng, n, slope=None, noise=1.0):
 
 def gen_exp_trend(rng, n, rate=None, noise=1.0):
     t = np.arange(n, dtype=np.float64)
-    rate = rng.uniform(0.002, 0.02) if rate is None else rate
+    # Bound TOTAL growth so long series can't overflow float32 in the downstream
+    # variance/normalization (a fixed per-step rate makes exp(rate*t) explode for
+    # large n: ~1e29 at n=4096, whose square overflows fp32 -> NaN/divergence).
+    # Grow by exp(1)..exp(6) (~3x..400x) end-to-end regardless of length.
+    if rate is None:
+        rate = rng.uniform(1.0, 6.0) / max(1, n - 1)
     return np.exp(rate * t) + rng.normal(0, noise, n)
 
 
