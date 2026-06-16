@@ -599,6 +599,22 @@ frozen `Item`.
 - **G5 reuse (decided):** this is the **shared on-disk home** — G5 writes GIFT-Eval pretrain/`train` shards into
   the same format (a `source` tag + per-series metadata already in the index) and streams them through this one
   reader; only the synthetic + a pretrain-slice source are materialized/wired this session.
+- **WSL GPU validation + two stability fixes (2026-06-15).** Ran the streamed corpus on the RTX 3070
+  (`configs/streaming_run.yaml` reuses `overfit_run`: reservoir-train on the `streaming` loader over
+  `corpus_mixed` = 20k synthetic + 166,436 real GiftEvalPretrain series; score/plot **zero-shot** on real
+  GIFT-Eval test). The first 2k run **diverged** (loss 2.5→112, leaderboard NaN), surfacing two real bugs,
+  both fixed + regression-tested:
+  - **(i) `gen_exp_trend` fp32 overflow** (`735de55`): a fixed per-step exp rate made `exp(rate·t)` explode for
+    long series (~1e29 at n=4096); the squared magnitude overflows fp32 in the normalization variance → NaN.
+    Bound total growth to `exp(1)..exp(6)` (~3×..400×) regardless of length (corpus max now ~6e5, fp32-safe).
+  - **(ii) no gradient clipping**: even with bounded data a single high-loss batch spiked the loss and, with no
+    clip, exploded the weights. Added `RunCfg.grad_clip` (default **0.0 = off** → G3.1/sanity/shakedown
+    unchanged), threaded into `train_step` via `clip_grad_norm_` over the optimizer params; `streaming_run.yaml`
+    sets `1.0`.
+  Post-fix the streaming run is **stable**. Zero-shot on real GIFT-Eval test (all 154/154 configs finite, 0
+  skipped): **2k → leaderboard MASE 209.6→3.78 (skill 2.21)**; **20k → [PENDING-20K]**. The diverse synthetic+
+  pretrain model already generalizes zero-shot better than the G3.1 5k test-*overfit* (8.14). Full run results +
+  reproduction: `docs/tetris/sanity_experiments/gifteval_wsl_runs.md`.
 
 ---
 
