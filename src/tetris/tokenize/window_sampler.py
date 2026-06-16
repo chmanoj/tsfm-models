@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import ceil
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -47,9 +47,30 @@ class SamplerParams:
         assert self.p_out in PATCH, f"p_out {self.p_out} must be in the patch vocabulary {PATCH}"
 
 
+class FixedWindow(NamedTuple):
+    """Per-item deterministic crop intent (H1, noise-robustness Path B).
+
+    A generator that bakes a noisy *context* of ``ctx`` raw steps followed by a
+    clean (conditional-mean) *horizon* of ``horizon`` raw steps attaches this so
+    the sampler crops at exactly ``origin = ctx, p = horizon`` instead of the
+    random origin/horizon it draws for ordinary items — otherwise the random crop
+    would slice the horizon back into the noisy region and the clean-GT property
+    would be lost (see the H1 reconciliation block). ``horizon`` is still clamped
+    to the per-pass token budget; clamping only *shortens* the horizon, which stays
+    inside the clean region, so the property holds.
+    """
+
+    ctx: int
+    horizon: int
+
+
 def sample_window(n_features: int, n_targets: int, t_raw: int, params: SamplerParams,
-                  rng) -> SegmentSpec:
-    """Sample one crop spec from a sample's shape (walkthrough Stage 1)."""
+                  rng, fixed: Optional[FixedWindow] = None) -> SegmentSpec:
+    """Sample one crop spec from a sample's shape (walkthrough Stage 1).
+
+    ``fixed`` (default ``None`` → unchanged random sampling) pins the crop to a
+    baked ``(ctx, horizon)`` for noise-robustness items; every non-fixed path is
+    byte-identical to before."""
     C = n_features + n_targets
     assert C >= 1 and n_targets >= 1 and t_raw >= 2
 
@@ -70,7 +91,13 @@ def sample_window(n_features: int, n_targets: int, t_raw: int, params: SamplerPa
     max_q_by_cap = max(1, params.max_query_tokens // max(1, n_horizon_channels))
     q_tok_max = max(1, min(params.q_tok_max, max_q_by_budget, max_q_by_series, max_q_by_cap))
 
-    if params.crop_horizons:
+    if fixed is not None:
+        # H1 Path B: deterministic crop at the baked (ctx, horizon). Clamp the
+        # horizon to the series + per-pass token budget (only ever shortens it, so
+        # it stays inside the clean region); origin is pinned below.
+        p = max(1, min(int(fixed.horizon), t_raw - 1, q_tok_max * params.p_out))
+        q_tok = ceil(p / params.p_out)
+    elif params.crop_horizons:
         # D13 phase-2: draw a test-matched horizon, clamp to series + token budget.
         # The budget cap (q_tok_max·P_out) bounds the per-pass horizon exactly like
         # training always does — eval still rolls out the full test horizon (G3.1).
@@ -90,8 +117,13 @@ def sample_window(n_features: int, n_targets: int, t_raw: int, params: SamplerPa
     Q_total = Q + K
     n = max(1, (params.l_pack - Q_total) // C)
 
-    # Uniform random origin over valid positions: >=1 context step and p future steps.
-    origin = int(rng.integers(1, (t_raw - p) + 1))
+    # Origin: pinned to the baked context length for fixed windows (clamped to a
+    # valid position), else uniform over positions with >=1 context step and p
+    # future steps (D5: every position is a forecast origin).
+    if fixed is not None:
+        origin = int(np.clip(fixed.ctx, 1, t_raw - p))
+    else:
+        origin = int(rng.integers(1, (t_raw - p) + 1))
 
     # Coverage budget from n, clipped to available history before the origin.
     prior = params.tier_prior

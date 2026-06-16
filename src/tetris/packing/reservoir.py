@@ -36,10 +36,10 @@ from typing import Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..data.contract import Item, build_loader
+from ..data.contract import HintedItem, Item, build_loader
 from ..tokenize.assemble import AssembledSegment, assemble
 from ..tokenize.spec import SegmentSpec
-from ..tokenize.window_sampler import SamplerParams, sample_window
+from ..tokenize.window_sampler import FixedWindow, SamplerParams, sample_window
 from . import scheduler as SCHED
 from .collator import Batch, pack
 
@@ -185,17 +185,26 @@ class StreamingReservoir:
         self._ensure_started()
         while len(self._reservoir) < self.k and not self._exhausted:
             try:
-                item = next(self._base_iter)
+                pulled = next(self._base_iter)
             except StopIteration:
                 self._exhausted = True
                 break
             self._items_pulled += 1
+            # H1: a loader may yield a HintedItem carrying a per-item fixed crop
+            # (noise-robustness Path B); strip it to the frozen 3-tuple Item for
+            # assembly and pass the baked window to the sampler. Bare items keep the
+            # random sampling path unchanged.
+            if isinstance(pulled, HintedItem):
+                item, hint = pulled.item, pulled.fixed_window
+            else:
+                item, hint = pulled, None
             data, nf, nt = item
             params = self.params
             if self._crop_schedule is not None:
                 frac = min(1.0, self._items_pulled / max(1, self._crop_total))
                 params = self._crop_schedule(frac)
-            spec = sample_window(nf, nt, int(data.shape[1]), params, self._rng)
+            fixed = FixedWindow(int(hint[0]), int(hint[1])) if hint is not None else None
+            spec = sample_window(nf, nt, int(data.shape[1]), params, self._rng, fixed=fixed)
             self._reservoir.append((item, spec))
 
     def _form_one_buffer(self) -> Buffer:

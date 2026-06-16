@@ -221,3 +221,4 @@ __marimo__/
 # TETRIS model run artifacts (configs/logs/plots) — not tracked
 outputs/
 prompts/
+src/tetris/data/profiles

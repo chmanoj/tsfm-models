@@ -37,7 +37,11 @@ import torch
 
 from .contract import Item, validate_item
 
-FORMAT_VERSION = 1
+# v2 (H1): added per-series ``crop_ctx``/``crop_p`` index columns for the
+# noise-robustness fixed-window items (Path B). v1 corpora are still readable —
+# the reader synthesizes the columns as -1 (= no fixed window) when absent.
+FORMAT_VERSION = 2
+_READABLE_VERSIONS = (1, 2)
 # One row per series; all series in a shard share one contiguous float32 buffer.
 SHARD_SCHEMA = pa.schema([("values", pa.list_(pa.float32()))])
 # int32 list offsets cap a shard at ~2.1e9 floats; flush before that (and far
@@ -45,7 +49,7 @@ SHARD_SCHEMA = pa.schema([("values", pa.list_(pa.float32()))])
 _MAX_FLOATS_PER_SHARD = 256_000_000
 
 _INDEX_FIELDS = ("shard", "row", "C", "nf", "nt", "length", "season_length",
-                 "source", "kind", "item_id")
+                 "source", "kind", "item_id", "crop_ctx", "crop_p")
 
 
 class ShardWriter:
@@ -75,7 +79,7 @@ class ShardWriter:
 
     def add(self, data: np.ndarray, num_features: int, num_targets: int, *,
             season_length: int = -1, source: str = "", kind: str = "",
-            item_id: str = "") -> None:
+            item_id: str = "", crop_ctx: int = -1, crop_p: int = -1) -> None:
         data = np.ascontiguousarray(data, dtype=np.float32)
         if data.ndim != 2:
             raise ValueError(f"series must be 2-D [C, t], got shape {tuple(data.shape)}")
@@ -94,6 +98,7 @@ class ShardWriter:
             shard=len(self._shards), row=len(self._buf), C=C, nf=nf, nt=nt,
             length=t, season_length=int(season_length),
             source=str(source), kind=str(kind), item_id=str(item_id),
+            crop_ctx=int(crop_ctx), crop_p=int(crop_p),
         ))
         self._buf.append(flat)
         self._buf_floats += int(flat.size)
@@ -125,6 +130,8 @@ class ShardWriter:
             "source": pa.array(cols["source"], pa.string()),
             "kind": pa.array(cols["kind"], pa.string()),
             "item_id": pa.array(cols["item_id"], pa.string()),
+            "crop_ctx": pa.array(cols["crop_ctx"], pa.int32()),
+            "crop_p": pa.array(cols["crop_p"], pa.int32()),
         })
         with pa.OSFile(str(self.root / "index.arrow"), "wb") as sink:
             with ipc.new_file(sink, idx.schema) as w:
@@ -159,7 +166,7 @@ class ShardReader:
     def __init__(self, root) -> None:
         self.root = Path(root)
         self.manifest = json.loads((self.root / "manifest.json").read_text())
-        if self.manifest.get("version") != FORMAT_VERSION:
+        if self.manifest.get("version") not in _READABLE_VERSIONS:
             raise ValueError(f"unsupported shard format version {self.manifest.get('version')!r}")
         self._index_mm = pa.memory_map(str(self.root / "index.arrow"), "r")
         itab = ipc.open_file(self._index_mm).read_all()
@@ -170,6 +177,12 @@ class ShardReader:
         self._nt = itab.column("nt").to_numpy()
         self._length = itab.column("length").to_numpy()
         self._season = itab.column("season_length").to_numpy()
+        # v1 corpora predate the fixed-window columns → synthesize -1 (no fixed window).
+        names = set(itab.schema.names)
+        self._crop_ctx = (itab.column("crop_ctx").to_numpy() if "crop_ctx" in names
+                          else np.full(itab.num_rows, -1, np.int32))
+        self._crop_p = (itab.column("crop_p").to_numpy() if "crop_p" in names
+                        else np.full(itab.num_rows, -1, np.int32))
         self._index_table = itab  # keep strings (source/kind/item_id) addressable
         self._n = itab.num_rows
         self._shard_paths = [s["path"] for s in self.manifest["shards"]]
@@ -207,6 +220,13 @@ class ShardReader:
         validate_item(item)
         return item
 
+    def crop_hint(self, gidx: int) -> Optional[tuple]:
+        """``(ctx, horizon)`` fixed-window hint for the noise-robustness items, or
+        ``None`` when this series uses ordinary random cropping (the default / all
+        v1 series)."""
+        ctx, p = int(self._crop_ctx[gidx]), int(self._crop_p[gidx])
+        return (ctx, p) if ctx > 0 and p > 0 else None
+
     def meta(self, gidx: int) -> dict:
         return dict(
             shard=int(self._shard[gidx]), row=int(self._row[gidx]),
@@ -215,6 +235,7 @@ class ShardReader:
             source=self._index_table.column("source")[gidx].as_py(),
             kind=self._index_table.column("kind")[gidx].as_py(),
             item_id=self._index_table.column("item_id")[gidx].as_py(),
+            crop_ctx=int(self._crop_ctx[gidx]), crop_p=int(self._crop_p[gidx]),
         )
 
 
@@ -246,10 +267,15 @@ class StreamingShardLoader:
                    cycle=cfg.data.shard_cycle, seed=cfg.run.seed)
 
     def __iter__(self):
+        from .contract import HintedItem
         shard = range(self.rank, self.reader.n_series, self.world_size)
         while True:
             for idx in shard:
-                yield self.reader.read(idx)
+                item = self.reader.read(idx)
+                hint = self.reader.crop_hint(idx)
+                # Bake the per-item fixed window (H1 Path B) only when set; otherwise
+                # yield the bare frozen Item so the random-crop path is unchanged.
+                yield HintedItem(item, hint) if hint is not None else item
             if not self.cycle:
                 return
 

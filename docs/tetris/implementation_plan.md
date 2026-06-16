@@ -687,6 +687,76 @@ one streaming loader", **toward the live loader**); (4) the **train split is inc
 
 ---
 
+**Synth-v2 H1 reconciliation (better synthetic corpus + Tier-1 quality harness — pinned, do not re-flag):**
+H1 builds a **measurably better** synthetic corpus in two tagged families + a training-free harness that
+decides whether it is better, on **one shared feature space**. Precondition G4 (shards/`synthetic_corpus`/
+`materialize`) + G5 (`auto_from_test_configs`, leaderboard). `uv run pytest` **170→187 passed, 2 skipped**
+(all new files + one additive seam change). **Session decisions (maintainer, asked at start):** (1) general =
+**multivariate-first** broad coverage, not a fixed recipe; (2) targeted matches the **full empirical data
+distribution**, not just freq/season/horizon/C metadata; (3) noise-robustness = **clean-horizon Path B** (below);
+(4) harness = **Tier-1 only** this session (transfer probe deferred); (5) dilution both pure-noise + weak-signal
+distractors, p≈0.3, ≤3 extra.
+
+- **(MODEL-LEVEL SEAM CHANGE — fixed-window crop, Path B; additive + default-off).** The maintainer's
+  noise-robustness idea: a series of length `ctx+horizon` whose **context is the noisy realization** and whose
+  **horizon is the clean conditional mean** `E[x_{t+h}|F_ctx]`, so the model is trained to predict the predictable
+  part and never the unforecastable innovation — **with no loss change** (scoring the clean GT is automatic once
+  the crop lands on the baked boundary). The blocker: `StreamingReservoir` re-crops every item via `sample_window`
+  at a **random origin** (`window_sampler.py`, D5 "every position is a forecast origin"), which would slice the
+  horizon back into the noisy region. Fix, **per-item**: (i) `window_sampler.sample_window(..., fixed=FixedWindow(ctx,
+  horizon))` pins `origin=ctx, p=horizon` (horizon still clamped to the per-pass token budget — only shortens, stays
+  in the clean region); default `fixed=None` is byte-identical to before. (ii) A loader may yield a `HintedItem(item,
+  (ctx,horizon))` (`data/contract.py`) — a **loader→reservoir side-channel only**; the reservoir strips it and feeds
+  the frozen 3-tuple `Item` to `assemble`/`pack` unchanged (the model-facing contract is untouched). (iii) The shard
+  index gains `crop_ctx`/`crop_p` columns (`FORMAT_VERSION 1→2`, **v1 read-back compat**: missing ⇒ -1 ⇒ no hint);
+  `StreamingShardLoader` emits `HintedItem` only when set; the curriculum mixture passes hints through transparently.
+  Every pre-H1 path (random crop) is unchanged. The **clean-target loss** (subtracting the noise floor from the
+  gradient) is a *further* enhancement that touches `losses.py` and is **deferred to H2** (flagged, not silently done).
+- **(A) Shared feature battery (`data/features.py`).** One hand-rolled, numpy-only, NaN-robust feature vector per
+  series (spectral entropy, ACF@1/diff, trend/seasonal strength, dominant-period frac, intermittency, log-scale,
+  log-length, excess kurtosis, stationarity). Used by **all three** of {TestProfile, targeted generator, C2ST harness}
+  so "targeted matches test" ⇔ "C2ST can't separate them" on the *same* axes.
+- **(B) `synth_general` (`data/synthetic_v2.py`).** Multivariate **KernelSynth** (composed RBF/periodic/linear/RQ/
+  white kernels → shared factor bank → channels; univariate = C=1) + **SDEs** (OU mean-reverting, GBM, jump-diffusion,
+  vol-clustering) + the **noise-robust Path-B** family + structural-TS + the G4 multi-seasonal/intermittent/regime/
+  shared-factor families. **Dilution** channels (D5/D13) injected w.p. 0.3: extra *feature* channels (pure-noise or
+  weak-signal distractors) the model must ignore; targets never touched.
+- **(C) `synth_targeted` (`data/synthetic_targeted.py` + `data/test_profile.py`).** A **TestProfile** fits, per
+  GIFT-Eval config (term-stripped), the empirical *feature distribution* (per-feature quantiles) + structural marginals
+  (season/horizon/C) from the real **test** contexts — **aggregate stats only, never raw values, never per-series
+  matching → no leakage** (D13 "match the distribution, not the values", extended from metadata to the full feature
+  distribution). The targeted generator draws a group, samples length/season/C from its marginals, and produces a
+  **profile-conditioned mixture** (≈40% profile-rescaled draws from the diverse general families — for joint-manifold
+  coverage — else a parametric seasonal+trend+RBF-smoothed-noise synthesis tuned to the group's central features),
+  **rejection-sampled** on the key feature bands. `--from-test-configs`/subset overrides supported; the committed
+  profile is **gitignored** (rebuild/rsync as needed).
+- **(D) Tier-1 quality harness (`data/quality_harness.py`).** **C2ST** (k-fold logistic-regression ROC-AUC; null 0.5)
+  as the headline objective metric + per-feature **KS** punch-list + **RBF-MMD** + a **pure-noise control** + a
+  noise-robust **predictability floor**. Verdict is *relative* (targeted closer to test than general; noise the most
+  separable) with an honest *absolute* caveat. CLI `python -m tetris.data.quality_harness` writes a markdown/JSON report.
+- **Tier-1 result (Mac CPU, seed 0).** **targeted C2ST AUC 0.949 < general 0.966 < noise 0.997** — targeted is the
+  closest-to-test family and matches the structural axes (log_scale/trend/seasonal/kurtosis) best, but best real
+  AUC≈0.95 is **still separable**: the spectral/autocorrelation axes (sharp multi-harmonic periodicity of real
+  traffic/energy) and the length distribution are the **H2 data-quality levers**. Full report + the like-for-like
+  visual (`synth_targeted_vs_real.png`): `docs/tetris/sanity_experiments/synth_v2_quality.md`.
+- **`materialize` (`build_corpus_v2`, `--n-general/--n-targeted/--profile`)** writes both families (tagged
+  `synth_general`/`synth_targeted`) to the v2 shard format; targeted needs a fitted `--profile`. The legacy G4
+  `build_corpus` path is unchanged.
+- **Tests (17 new → `uv run pytest` 170→187 passed, 2 skipped):** `tests/test_synth_v2.py` — feature
+  determinism/finiteness/discrimination; fixed-window sampler (deterministic crop + unchanged random path);
+  HintedItem→reservoir→**clean horizon GT** end-to-end; shard v2 round-trip + **v1 read-back compat**; KernelSynth-MV/
+  SDE/noise-robust shapes + the clean-vs-noisy smoothness invariant; dilution; general-corpus tags/determinism;
+  TestProfile fit/save/load + **targeted-beats-general** on seasonal overlap; C2ST/KS/MMD/AUC/verdict on stubs.
+- **Lit-review (adopted + why):** **KernelSynth** (Chronos) — the dominant composed-GP-kernel recipe → realized
+  multivariate (Mystic-B/D13-C) as the general core; **ForecastPFN/structural-TS** (trend×season×holiday) → the
+  structural family; classical **SDEs/state-space** (OU/GBM/jump/ARCH) → the stochastic + noise-robust families;
+  **Chronos-Mixup**-style augmentation noted (time/scale warp) for H2. The **C2ST** (classifier two-sample test) is the
+  adopted objective overlap metric over bare MMD/KS because its null (AUC 0.5) is calibrated and its feature
+  importances/per-feature KS double as the generator punch-list. The transfer-probe (Tier-2) is the eventual
+  falsifiable bar, deferred until Tier-1 says the synth is close.
+
+---
+
 ## 1. Notation & global shape constants
 
 All per-batch shapes are static (D14: one compile graph; per-sample variability lives in tensor *contents*, never shapes).

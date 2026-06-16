@@ -25,6 +25,26 @@ import torch
 Item = Tuple[torch.Tensor, int, int]
 
 
+class HintedItem(NamedTuple):
+    """An ``Item`` plus an optional per-item crop hint (H1, noise-robustness Path B).
+
+    This is a **loader→reservoir** side-channel only: a loader may yield this
+    instead of a bare ``Item`` to ask the reservoir to crop the item at a fixed
+    ``(ctx, horizon)`` (``window_sampler.FixedWindow``) rather than randomly. The
+    reservoir strips the hint and feeds the frozen 3-tuple ``Item`` to
+    ``assemble``/``pack`` unchanged, so the model-facing contract is byte-identical.
+    Loaders that don't bake fixed windows keep yielding bare ``Item`` 3-tuples.
+    """
+
+    item: Item
+    fixed_window: Optional[Tuple[int, int]]  # (ctx, horizon) raw steps, or None
+
+
+def as_item(maybe_hinted) -> Item:
+    """Return the bare ``Item`` from either an ``Item`` or a ``HintedItem``."""
+    return maybe_hinted.item if isinstance(maybe_hinted, HintedItem) else maybe_hinted
+
+
 class EvalItem(NamedTuple):
     """GIFT-Eval test item (record-only scoring; D13/§6). Fields 1..3 are the
     training Item; held-out fields are stripped before packing."""

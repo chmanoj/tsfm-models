@@ -54,22 +54,71 @@ def build_corpus(
     return ShardReader(out).manifest
 
 
+def build_corpus_v2(
+    out: str,
+    *,
+    n_general: int = 20000,
+    n_targeted: int = 0,
+    profile_path: Optional[str] = None,
+    seed: int = 0,
+    shard_size: int = 2500,
+    dilution_prob: float = 0.3,
+    dilution_max_extra: int = 3,
+    length_range=(96, 4096),
+) -> dict:
+    """Write the synth-v2 corpus (H1): ``synth_general`` + (profile-conditioned)
+    ``synth_targeted``, both tagged into the shard index. ``synth_targeted`` requires
+    a fitted ``--profile`` (``tetris.data.test_profile``)."""
+    from .synthetic_v2 import write_general_corpus
+    builder = dict(seed=seed, n_general=n_general, n_targeted=n_targeted,
+                   shard_size=shard_size, length_range=list(length_range),
+                   dilution_prob=dilution_prob, profile=profile_path or "")
+    with ShardWriter(out, shard_size=shard_size, builder=builder) as w:
+        if n_general > 0:
+            write_general_corpus(w, n_series=n_general, seed=seed,
+                                 length_range=length_range,
+                                 dilution_prob=dilution_prob,
+                                 dilution_max_extra=dilution_max_extra)
+        if n_targeted > 0:
+            if not profile_path:
+                raise ValueError("--profile is required to materialize synth_targeted")
+            from .synthetic_targeted import write_targeted_corpus
+            from .test_profile import TestProfile
+            write_targeted_corpus(w, n_series=n_targeted,
+                                  profile=TestProfile.load(profile_path), seed=seed)
+    return ShardReader(out).manifest
+
+
 def main() -> None:  # pragma: no cover - manual entrypoint
     ap = argparse.ArgumentParser(description="Materialize a TETRIS streaming corpus")
     ap.add_argument("--out", required=True, help="output corpus directory")
-    ap.add_argument("--n-synthetic", type=int, default=20000)
+    ap.add_argument("--n-synthetic", type=int, default=20000,
+                    help="G4 varied-synthetic count (legacy 'synthetic' family)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--shard-size", type=int, default=2500)
     ap.add_argument("--pretrain-root", default=None,
                     help="downloaded GiftEvalPretrain root (optional)")
     ap.add_argument("--pretrain-max-series", type=int, default=None)
+    # synth-v2 (H1): general + targeted families. When either is >0 the v2 path runs.
+    ap.add_argument("--n-general", type=int, default=0, help="synth_general count (H1)")
+    ap.add_argument("--n-targeted", type=int, default=0, help="synth_targeted count (H1)")
+    ap.add_argument("--profile", default=None, help="TestProfile JSON (needed for targeted)")
+    ap.add_argument("--dilution-prob", type=float, default=0.3)
+    ap.add_argument("--dilution-max-extra", type=int, default=3)
     args = ap.parse_args()
 
-    root = os.path.expanduser(args.pretrain_root) if args.pretrain_root else None
-    manifest = build_corpus(
-        args.out, n_synthetic=args.n_synthetic, seed=args.seed,
-        shard_size=args.shard_size, pretrain_root=root,
-        pretrain_max_series=args.pretrain_max_series)
+    if args.n_general or args.n_targeted:
+        manifest = build_corpus_v2(
+            args.out, n_general=args.n_general, n_targeted=args.n_targeted,
+            profile_path=(os.path.expanduser(args.profile) if args.profile else None),
+            seed=args.seed, shard_size=args.shard_size,
+            dilution_prob=args.dilution_prob, dilution_max_extra=args.dilution_max_extra)
+    else:
+        root = os.path.expanduser(args.pretrain_root) if args.pretrain_root else None
+        manifest = build_corpus(
+            args.out, n_synthetic=args.n_synthetic, seed=args.seed,
+            shard_size=args.shard_size, pretrain_root=root,
+            pretrain_max_series=args.pretrain_max_series)
     srcs = ", ".join(f"{s['name']}={s['n_series']}" for s in manifest["sources"])
     print(f"wrote {manifest['n_series']} series in {len(manifest['shards'])} shards "
           f"to {args.out}  [{srcs}]")
