@@ -47,7 +47,8 @@ class CurriculumLoader:
 
     def __init__(self, components: List["_Source"], *, total_items: int,
                  phase2_start: float, alpha: float, temperature: float,
-                 seed: int = 0, rank: int = 0, world_size: int = 1) -> None:
+                 seed: int = 0, rank: int = 0, world_size: int = 1,
+                 log_every_pulls: int = 0) -> None:
         if not components:
             raise ValueError("CurriculumLoader needs >=1 component source")
         self.components = components
@@ -57,6 +58,10 @@ class CurriculumLoader:
         self.temperature = float(temperature)
         self.rank = int(rank)
         self.world_size = int(world_size)
+        # Periodic INFO heartbeat (rank 0 only): progress + live weights + the source
+        # histogram since the last beat — proves the phase-1→phase-2 mix shift in the
+        # train log. 0 = off (the default, so tests are silent).
+        self.log_every_pulls = int(log_every_pulls)
         # Per-rank RNG so source draws decorrelate across ranks (the component
         # loaders are already rank-sharded for disjoint *content*).
         self._rng = np.random.default_rng((int(seed), int(rank)))
@@ -79,7 +84,8 @@ class CurriculumLoader:
                 mult1=float(sc.multiplier_phase1), mult2=float(sc.multiplier_phase2)))
         return cls(components, total_items=c.total_items, phase2_start=c.phase2_start,
                    alpha=c.alpha, temperature=c.temperature,
-                   seed=cfg.run.seed, rank=rank, world_size=world_size)
+                   seed=cfg.run.seed, rank=rank, world_size=world_size,
+                   log_every_pulls=(2000 if rank == 0 else 0))
 
     # --- schedule --------------------------------------------------------------
 
@@ -112,6 +118,7 @@ class CurriculumLoader:
         iters = [iter(s.loader) for s in self.components]
         pulled = 0
         denom = max(1, self.total_items)
+        hist = np.zeros(len(iters), dtype=np.int64)   # source draws since last heartbeat
         while True:
             progress = min(1.0, pulled / denom)
             w = self.weights_at(progress)
@@ -122,6 +129,14 @@ class CurriculumLoader:
                 iters[j] = iter(self.components[j].loader)
                 item = next(iters[j])
             pulled += 1
+            hist[j] += 1
+            if self.log_every_pulls and pulled % self.log_every_pulls == 0:
+                phase = "phase1" if progress < self.phase2_start else "phase2/anneal"
+                mix = " ".join(f"{s.name}:w={w[i]:.2f},n={int(hist[i])}"
+                               for i, s in enumerate(self.components))
+                log.info("curriculum pull=%d progress=%.3f %s | %s",
+                         pulled, progress, phase, mix)
+                hist[:] = 0
             yield item
 
 

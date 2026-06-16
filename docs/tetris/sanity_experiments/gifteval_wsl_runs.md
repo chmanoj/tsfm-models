@@ -51,23 +51,41 @@ The first 2k diverged (loss 2.5→112, leaderboard NaN). Root causes, both fixed
    Added `RunCfg.grad_clip` (default 0.0 = off, so G3.1/sanity/shakedown are unchanged) threaded into
    `train_step` via `clip_grad_norm_`; `streaming_run.yaml` sets `1.0`. Post-fix: stable, all-finite.
 
-## Run 3 — G5 curriculum (pretrain + train-split + curriculum) — *maintainer's to run*
+## Run 3 — G5 curriculum (pretrain + train-split + curriculum)
 
 `configs/gifteval_curriculum.yaml` — reservoir-train on the `curriculum` loader (decision-log **D13** two-phase
-schedule) over **three sources**: varied synthetic (`corpus_synth`), the real ~1 GB GiftEvalPretrain slice
-(`corpus_pretrain`), and the **live GIFT-Eval `train` split** (`gifteval_train`). Phase 1 is synthetic-heavy +
-pretrain with the train split at natural weight; over `[phase2_start, 1]` synthetic fades, pretrain stays, the
-**train split is upweighted**, and the crop sampler switches to the **test-matched horizon marginal**
+schedule) over **three sources**: varied synthetic (`corpus_synth` = 20,000 series), the real GiftEvalPretrain slice
+(`corpus_pretrain` = 166,436 series), and the **live GIFT-Eval `train` split** (`gifteval_train`). Phase 1 is
+synthetic-heavy + pretrain with the train split at natural weight; over `[phase2_start, 1]` synthetic fades, pretrain
+stays, the **train split is upweighted**, and the crop sampler switches to the **test-matched horizon marginal**
 (`auto_from_test_configs`). This trains on the train split + test-matched crops, so it is **in-distribution-ish,
 NOT full zero-shot** — keep the framing honest.
 
 | run | steps | leaderboard MASE | skill | finite | time |
 |---|---|---|---|---|---|
-| 2k (end-to-end check) | 2000 | — | — | — | *maintainer will run* |
-| 20k (curriculum) | 20000 | — | — | — | *maintainer will run* |
+| **5k validation** (this impl, full live path) | 5000 | 209.65 → **5.65** (5.23 @ 2.5k) | 122.47 → 3.30 | 154/154 | 23m51s |
+| 20k (curriculum, tuned) | 20000 | — | — | — | *maintainer will run* |
 
-Validated on Mac CPU through `uv run pytest` (the reservoir-path curriculum train smoke + crop-schedule switch run
-green offline). The GPU run is the maintainer's, like G3.1/G4.
+**5k validation (2026-06-16, RTX 3070; run dir `outputs/gifteval_curriculum_20260616-084653/`, pulled to
+`outputs/wsl_g5_5k/`).** A deliberate end-to-end test of the **entire G5 path** in one live run (compiled CUDA Flex,
+10.56M params, `grad_clip=1.0`, 3.49 steps/s). It used a **compressed schedule** (`total_items=50000`,
+`phase2_start=0.5`) so phase 2 engages within 5k steps — at ~28 pulls/step the run pulled ~816k items, so progress
+saturated by ~step 1800. **Everything exercised + verified:**
+- **All three live sources mixed**, including the live GIFT-Eval `train` split loaded from real data. The curriculum
+  heartbeat shows the **phase-1 → phase-2 anneal** doing exactly what D13 prescribes — the mix shifted from
+  `synthetic w=0.28 / pretrain w=0.50 / train w=0.21` (phase 1) to `0.08 / 0.37 / 0.54` (full phase 2: **train split
+  dominant**), matching the computed `(mult × size^0.4)^(1/1.5)` weights.
+- **`auto_from_test_configs`** derived the horizon marginal from the real 97-config test table at startup (the run got
+  past the reservoir crop-schedule build with no error) and the crop sampler switched to test-matched horizons at
+  `phase2_start`.
+- **Leaderboard MASE finite at every eval** (random-init 209.65 → 5.23 @ 2.5k → **5.65 final**, snaive 1.71, **all
+  154/154 configs finite, 0 skipped**), stable (no NaN/divergence), **10 sample plots** written (`samples.png`).
+
+It does **not** beat seasonal naive (skill 3.30 > 1) and is weaker than G4's 20k zero-shot (3.41) — expected: this is a
+**5k correctness/plumbing validation with a compressed schedule, not a tuned/long run**. The leaderboard is
+non-monotonic (5.23 @ 2.5k < 5.65 final), the same multi-config trade-off seen in G4; FINAL is the reported number.
+Closing the gap to snaive is a scale + schedule-tuning question (the 20k tuned run + the deferred follow-ups), not an
+implementation one. Also validated on Mac CPU through `uv run pytest` (170 passed, 2 skipped).
 
 ### One-time data prep on the box (TWO separate corpora so synthetic and pretrain weight apart)
 ```bash
