@@ -31,15 +31,16 @@ leaderboard path is correct on GPU, finite throughout, 0 skipped. Run dir: `outp
 | run | steps | leaderboard MASE | skill | finite | time |
 |---|---|---|---|---|---|
 | 2k (end-to-end check) | 2000 | **209.65 → 3.78** | 122.47 → 2.21 | 154/154 | 9 min |
-| 20k (longer) | 20000 | *[PENDING-20K — fill from the run below]* | | | |
+| 20k (longer) | 20000 | **209.65 → 3.41** | 122.47 → 1.99 | 154/154 | 1h24m |
 
-The 20k run dir on the box: **`outputs/streaming_run_20260615-211715/`** — when it finishes, read
-`train_log.txt` (final `FINAL: leaderboard_MASE=…`) and copy `samples.png` (10 zero-shot forecast plots) +
-the numbers into the table above and the G4 reconciliation block (`[PENDING-20K]` markers).
+20k run dir on the box: `outputs/streaming_run_20260615-211715/` (model.pt, samples.png, train_log.txt).
+Training was stable end-to-end (loss bounded ~1.2–2.7, no divergence; all 154 cells finite at every eval).
+The mid-train leaderboard MASE is **non-monotonic** (e.g. 3.78 @ step-eval early, 18.8 @ 5k, 3.41 final) —
+the diverse 154-cell metric trades off across configs during training; the FINAL is the reported number.
 
-The diverse synthetic+pretrain model already generalizes zero-shot to real GIFT-Eval (MASE 3.78 at 2k) —
-better than the G3.1 5k test-*overfit* (8.14), which is a nice signal that the streamed corpus teaches
-transferable structure.
+The diverse synthetic+pretrain model generalizes **zero-shot** to real GIFT-Eval at **MASE 3.41 (skill 1.99)**
+— better than the G3.1 5k test-*overfit* (8.14), a nice signal that the streamed corpus teaches transferable
+structure. It does not yet beat seasonal naive (skill > 1); closing that is a scale/curriculum question for G5.
 
 ### Two stability fixes found by the first (diverging) 2k run
 The first 2k diverged (loss 2.5→112, leaderboard NaN). Root causes, both fixed + regression-tested:

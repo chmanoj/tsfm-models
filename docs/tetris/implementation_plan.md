@@ -612,7 +612,7 @@ frozen `Item`.
     unchanged), threaded into `train_step` via `clip_grad_norm_` over the optimizer params; `streaming_run.yaml`
     sets `1.0`.
   Post-fix the streaming run is **stable**. Zero-shot on real GIFT-Eval test (all 154/154 configs finite, 0
-  skipped): **2k → leaderboard MASE 209.6→3.78 (skill 2.21)**; **20k → [PENDING-20K]**. The diverse synthetic+
+  skipped): **2k → leaderboard MASE 209.6→3.78 (skill 2.21)**; **20k → leaderboard MASE 209.6→3.41 (skill 1.99)**. The diverse synthetic+
   pretrain model already generalizes zero-shot better than the G3.1 5k test-*overfit* (8.14). Full run results +
   reproduction: `docs/tetris/sanity_experiments/gifteval_wsl_runs.md`.
 
