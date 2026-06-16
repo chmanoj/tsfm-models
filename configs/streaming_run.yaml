@@ -1,0 +1,58 @@
+# G4 streaming-corpus run — train the `streaming` loader over a materialized
+# Arrow-IPC corpus (synthetic + real GiftEvalPretrain) and score/plot ZERO-SHOT on
+# real GIFT-Eval test windows. Reuses the overfit_run harness (reservoir train on
+# cfg.data.loader; leaderboard + sample plots on cfg.eval.loader). This is NOT an
+# overfit (the model never sees the test split) — it's a synthetic+pretrain model
+# evaluated zero-shot, so expect weak leaderboard MASE; the point is the streaming
+# path on GPU + a loss curve + sample forecasts.
+#
+# Materialize the corpus first (on the box):
+#   uv run python -m tetris.data.materialize --out outputs/corpus_mixed \
+#       --n-synthetic 20000 --pretrain-root "$GIFT_EVAL_PRETRAIN"
+# Then:
+#   # 2k end-to-end GPU check
+#   uv run python -m tetris.train.overfit_run configs/streaming_run.yaml \
+#       --steps 2000 --eval-every 2000 --device cuda --n-plot 10
+#   # 20k longer run
+#   uv run python -m tetris.train.overfit_run configs/streaming_run.yaml \
+#       --steps 20000 --eval-every 5000 --device cuda --n-plot 10
+
+run:
+  name: streaming_run
+  steps: 20000
+  seed: 0
+
+backend:
+  device: auto
+  compile: true            # CUDA Flex + torch.compile (no-op off CUDA)
+
+model:
+  d_model: 224             # ~10.56M params at 6 layers (matches the G3.1 run)
+  n_layers: 6
+  n_heads: 4
+  out_patch: 16
+
+data:
+  loader: streaming        # G4: read the materialized Arrow-IPC shard corpus
+  shard_root: outputs/corpus_mixed
+  shard_cycle: true        # unbounded pretrain-style stream (run stops at `steps`)
+  terms: [short, medium, long]   # eval terms for the GIFT-Eval leaderboard/plots
+  local_dir: ""            # empty -> $GIFT_EVAL (the box's .env) for the eval split
+
+packing:
+  L_pack: 512
+  max_query_tokens: 128    # per-pass horizon-token budget (G3.1); eval rolls out the full horizon
+  buffers_per_step: 4      # conservative for the 8 GiB RTX 3070
+  reservoir: true
+  reservoir_k: 1000        # shuffle buffer over the streamed corpus
+  scheduler_window: 64
+
+eval:
+  enabled: true
+  loader: gifteval_test    # real GIFT-Eval test windows -> zero-shot leaderboard MASE + plots
+  items_per_config: 10
+
+tracking:
+  backend: wandb
+  project: tetris
+  mode: auto
