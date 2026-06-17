@@ -22,167 +22,164 @@ from . import features as F
 from . import synthetic as S
 from .test_profile import TestProfile
 
-# Features that most distinguish dynamics — rejection must satisfy these.
-_KEY_FEATURES = ("seasonal_strength", "trend_strength", "spectral_entropy",
-                 "acf1", "intermittency")
-_KEY_IDX = tuple(F.FEATURE_NAMES.index(n) for n in _KEY_FEATURES)
-
-
 def _clip(v, lo, hi):
     return float(min(max(v, lo), hi))
 
 
-def _seasonal_component(rng, t: np.ndarray, m: int, seas_str: float) -> np.ndarray:
-    """Realistic seasonal shape at period ``m``: a multi-harmonic Fourier series, or
-    (for strongly seasonal groups) a sharp **von Mises** peak train — real GIFT-Eval
-    traffic/energy series have sharp, multi-harmonic daily cycles that a single
-    sinusoid can't reproduce (the spectral_entropy/acf gap in the Tier-1 punch-list)."""
-    phase = rng.uniform(0, 2 * np.pi)
-    w = 2 * np.pi * t / m
-    if seas_str > 0.4 and rng.random() < 0.6:
-        # von Mises bump train: sharp periodic peaks (higher κ ⇒ sharper)
-        kappa = float(rng.uniform(2.0, 8.0))
-        x = np.exp(kappa * (np.cos(w + phase) - 1.0))
-    else:
-        # Fourier series with 2–4 harmonics and decaying amplitudes
-        n_harm = int(rng.integers(2, 5))
-        x = np.zeros_like(t)
-        for h in range(1, n_harm + 1):
-            x += (rng.uniform(0.4, 1.0) / h) * np.sin(h * w + rng.uniform(0, 2 * np.pi))
+def _ar_noise(rng, n: int, ar_coef) -> np.ndarray:
+    """AR(p) process with the config's fitted coefficients → the right *predictable*
+    autocorrelation (smooth/trending vs mean-reverting). Shrinks explosive roots so the
+    process is stationary (predictable, bounded)."""
+    coef = [float(c) for c in (ar_coef or [])][:3]
+    if not coef or n < 2:
+        return rng.normal(0, 1, n)
+    s = sum(abs(c) for c in coef)
+    if s >= 0.99:
+        coef = [c * 0.98 / s for c in coef]
+    p = len(coef)
+    e = rng.normal(0, 1, n)
+    x = np.zeros(n)
+    for i in range(n):
+        acc = e[i]
+        for j in range(p):
+            if i - j - 1 >= 0:
+                acc += coef[j] * x[i - j - 1]
+        x[i] = acc
     return S._standardize(x)
 
 
-def _impulsive_channel(rng, n: int, m: int, kurt: float) -> np.ndarray:
-    """Flat baseline + periodic sharp spikes (at the calendar period and a sub-period)
-    + rare heavy-tail outliers — the server/traffic-trace pattern (high excess_kurtosis,
-    low seasonal-variance) that smooth seasonal synthesis misses (bitbrains_rnd/5T etc.).
-    """
-    x = rng.normal(0, 0.15, n)                       # near-flat baseline
-    periods = [m] if m and m >= 2 else []
-    if m and m // 6 >= 2 and rng.random() < 0.7:     # add a sub-period spike train
-        periods.append(int(m // rng.integers(4, 8)))
-    for p in periods:
-        amp = rng.uniform(2, 6)
-        for c in range(p, n, p):                     # spike once per period (jittered)
-            j = c + int(rng.integers(-p // 10 - 1, p // 10 + 1))
-            if 0 <= j < n:
-                x[j] += amp * rng.uniform(0.6, 1.4)
-    n_out = int(max(0, rng.normal(2 + 4 * kurt, 1)))  # rare huge outliers
-    for _ in range(n_out):
-        x[int(rng.integers(n))] += rng.uniform(6, 18) * rng.choice([-1.0, 1.0])
-    return S._standardize(x)
+def _periodic_signal(rng, n: int, periods, *, sharp: bool) -> np.ndarray:
+    """Sum sinusoids at the config's dominant ``(period, weight)`` components (+ 2nd/3rd
+    harmonics when ``sharp`` → peaked shapes). Fixed periods/phase per series ⇒ the
+    periodicity is **regular and forecastable**, not random."""
+    t = np.arange(n, dtype=np.float64)
+    x = np.zeros(n)
+    for period, weight in (periods or []):
+        if not (2 <= period <= n / 2):
+            continue
+        amp = float(np.sqrt(max(weight, 1e-3)))
+        phase = rng.uniform(0, 2 * np.pi)
+        x += amp * np.sin(2 * np.pi * t / period + phase)
+        if sharp:
+            for h in (2, 3):
+                if period / h >= 2:
+                    x += (amp / h) * np.sin(2 * np.pi * h * t / period + phase)
+    return S._standardize(x) if np.any(x) else x
 
 
-def _targeted_channel(rng, n: int, m: int, center: dict) -> np.ndarray:
-    """One channel guided by a group's central feature vector ``center`` (a
-    name→value dict). Allocates variance to seasonal / trend / noise components so
-    the feature extractor recovers the targeted strengths; rejection sampling refines.
-    """
+def _fallback_periods(rng, n: int, m: int, profile, group) -> list:
+    periods = profile.dominant_periods(group)
+    if not periods and m and m >= 2:
+        periods = [[int(m), 1.0]]
+    return periods
+
+
+def _gen_spectral(rng, n, group, profile, center, m) -> np.ndarray:
+    """PSD / dominant-component synthesis: regular multi-harmonic periodicity from the
+    config's fitted dominant periods + bounded AR noise. Predictable by construction."""
+    seas = _periodic_signal(rng, n, _fallback_periods(rng, n, m, profile, group), sharp=True)
+    seas_str = _clip(center.get("seasonal_strength", 0.5), 0.1, 0.92)
+    noise = _ar_noise(rng, n, profile.ar_coef(group))
+    if not np.any(seas):
+        return noise
+    return S._standardize(np.sqrt(seas_str) * seas + np.sqrt(1 - seas_str) * noise)
+
+
+def _gen_structural_ar(rng, n, group, profile, center, m) -> np.ndarray:
+    """level + trend (+ occasional level-shift) + seasonal(dominant) + AR(p) noise from
+    the fitted coefficients — reproduces trends/level-shifts/autocorrelation."""
     t = np.arange(n, dtype=np.float64)
     trend_str = _clip(center.get("trend_strength", 0.2), 0, 1)
     seas_str = _clip(center.get("seasonal_strength", 0.2), 0, 1)
-    acf1 = _clip(center.get("acf1", 0.3), -0.95, 0.95)
-    interm = _clip(center.get("intermittency", 0.0), 0, 1)
-    kurt = _clip(center.get("excess_kurtosis", 0.0), -1, 1)
-    scale = float(np.expm1(_clip(center.get("log_scale", 1.0), 0, 12))) + 1e-3
-
-    # impulsive/spiky regime (heavy-tailed, low seasonal variance): flat baseline +
-    # periodic sharp spikes + outliers, not the smooth seasonal+trend+noise mix.
-    if kurt > 0.4 and seas_str < 0.3:
-        return scale * _impulsive_channel(rng, n, m, kurt) + rng.uniform(-50, 50)
-
-    seasonal = (_seasonal_component(rng, t, m, seas_str)
-                if m and m >= 2 and n > 2 * m else np.zeros(n))
+    seas = _periodic_signal(rng, n, _fallback_periods(rng, n, m, profile, group), sharp=False)
     lin = S._standardize(t) if n > 1 else np.zeros(n)
-    # heavy-tailed innovations when the group has fat-tailed diffs (Student-t echo)
-    if kurt > 0.1:
-        df = float(np.clip(30 * (1 - kurt), 3, 30))
-        white = S._standardize(rng.standard_t(df, n))
-    else:
-        white = rng.normal(0, 1, n)
-    # RBF-smoothed noise: real test series are smooth (high acf1, low spectral
-    # entropy), so a Gaussian-smoothed process matches their spectral shape far better
-    # than AR(1)/white. Map the target acf1 to an RBF lengthscale (higher acf1 ⇒
-    # longer ℓ ⇒ smoother), which jointly fixes acf1 / stationarity / spectral_entropy.
-    ell = float(np.clip(1.0 / max(1e-3, 1.0 - _clip(acf1, 0.0, 0.98)), 1.0, n / 4))
-    half = int(min(max(1, 3 * ell), max(1, (n - 1) // 2)))  # keep kernel <= n (conv 'same')
-    kt = np.arange(-half, half + 1)
-    kern = np.exp(-0.5 * (kt / ell) ** 2); kern /= kern.sum()
-    noise = S._standardize(np.convolve(white, kern, mode="same"))
+    if rng.random() < 0.3 and n > 10:                       # occasional level shift
+        cut = int(rng.uniform(0.3, 0.7) * n)
+        lin = lin.copy(); lin[cut:] += rng.uniform(-2.5, 2.5)
+        lin = S._standardize(lin)
+    noise = _ar_noise(rng, n, profile.ar_coef(group))
+    f_s = seas_str; f_t = trend_str * (1 - seas_str); f_n = max(0.05, 1 - f_s - f_t)
+    return S._standardize(np.sqrt(f_s) * seas + np.sqrt(f_t) * lin + np.sqrt(f_n) * noise)
 
-    # variance allocation: seasonal -> seas_str, trend -> trend_str·(1-seas_str), rest noise.
-    # sqrt weights make the variance *fractions* match (components ~orthogonal, unit var).
-    f_s = seas_str
-    f_t = trend_str * (1.0 - seas_str)
-    f_n = max(0.02, 1.0 - f_s - f_t)
-    sig = (np.sqrt(f_s) * seasonal + np.sqrt(f_t) * lin + np.sqrt(f_n) * noise)
-    sig = S._standardize(sig)
-    if interm > 0.05:  # zero out a fraction to mimic intermittent/sparse series
-        sig = sig * (rng.random(n) >= interm)
-    return scale * sig + rng.uniform(-50, 50)
+
+def _gen_regular_spikes(rng, n, group, profile, center, m) -> np.ndarray:
+    """Flat AR baseline + **regular** spike train(s) at the dominant period(s): fixed
+    period, fixed phase, near-constant amplitude, minimal jitter → the spikes are
+    **predictable** (the bitbrains pattern done right, not random spikes)."""
+    periods = [int(p) for p, _ in (profile.dominant_periods(group) or []) if 2 <= p <= n / 2][:2]
+    if not periods:
+        periods = [int(m)] if m and 2 <= m <= n / 2 else [max(2, n // 8)]
+    x = 0.25 * _ar_noise(rng, n, profile.ar_coef(group))    # quiet baseline
+    for period in periods:
+        amp = rng.uniform(3.0, 6.0)
+        phase = int(rng.integers(0, period))                # consistent offset
+        jit = max(0, period // 40)                          # minimal jitter
+        for c in range(phase, n, period):
+            j = c + (int(rng.integers(-jit, jit + 1)) if jit > 0 else 0)
+            if 0 <= j < n:
+                x[j] += amp * rng.uniform(0.92, 1.08)       # near-constant height
+    return S._standardize(x)
+
+
+_TARGETED_GENERATORS = (_gen_spectral, _gen_structural_ar, _gen_regular_spikes)
+
+
+def _shape(rng, n: int, C: int, backbone: np.ndarray, interm: float,
+           target_scale: float) -> np.ndarray:
+    """Apply intermittency, scale, offset, and (for C>1) per-channel variation."""
+    def one(b):
+        if interm > 0.05:
+            b = b * (rng.random(n) >= interm)
+        return target_scale * b + rng.uniform(-50, 50)
+    if C == 1:
+        return one(backbone)[None, :]
+    sd = float(np.nanstd(backbone)) + 1e-8
+    return np.stack([one(backbone * rng.uniform(0.6, 1.4)
+                         + rng.uniform(0.1, 0.4) * sd * rng.normal(0, 1, n))
+                     for _ in range(C)])
 
 
 def gen_targeted(rng, profile: TestProfile, *, group: Optional[str] = None,
-                 n_tries: int = 10) -> Tuple[np.ndarray, int, int, int, str]:
+                 n_tries: int = 1) -> Tuple[np.ndarray, int, int, int, str]:
     """Generate one ``synth_targeted`` series matching ``profile``.
 
-    Returns ``(data[C,t], nf, nt, season_length, group)``. Draws a frequency group,
-    samples ``(length, season m, C)`` from its marginals, generates a channel guided
-    by the group's central features, and keeps the candidate whose feature vector is
-    closest to the group center (accepting early once the key features land in band).
-    """
+    Draws a config group + its ``(length, season, C)`` marginals, then **selects among
+    three predictable generators by goodness-of-fit** — spectral/dominant-component,
+    structural+AR, and a regular spike-train — keeping the candidate whose feature vector
+    is closest to the group center. The chosen generator is whichever best reproduces the
+    config (periodic → spectral, trending → structural/AR, impulsive → regular spikes),
+    so every series is *learnable* (predictable structure + bounded noise), never random.
+    Returns ``(data[C,t], nf, nt, season_length, group)``."""
     group = group or profile.sample_group(rng)
     center_vec = profile.feature_center(group)
     center = dict(zip(F.FEATURE_NAMES, center_vec))
-    scale = profile.feature_scale(group)
-    lo, hi = profile.feature_bands(group)
+    scale_vec = profile.feature_scale(group)
 
     m = profile.sample_season(group, rng)
     C = profile.sample_n_channels(group, rng)
-    # sample length across the group's empirical log_length spread (q05..q95), not a
-    # single center value, so the synthetic length distribution matches the test one.
     q = profile.groups[group]["feature_quantiles"]["log_length"]
     n = int(np.clip(round(float(np.expm1(rng.uniform(q[0], q[4])))), 96, 4096))
+    interm = _clip(center.get("intermittency", 0.0), 0, 1)
+    target_scale = float(np.expm1(_clip(center.get("log_scale", 1.0), 0, 14))) + 1e-3
 
-    log_scale_target = _clip(center.get("log_scale", 1.0), 0, 14)
+    # Eligible generators gated by config character (so the spike train can't be chosen
+    # for a smooth/seasonal config just because feature-distance happens to favor it):
+    # regular-spikes only for genuinely impulsive (high-kurtosis) configs.
+    kurt = _clip(center.get("excess_kurtosis", 0.0), -1, 1)
+    eligible = [_gen_spectral, _gen_structural_ar]
+    if kurt > 0.5:
+        eligible.append(_gen_regular_spikes)
+
     best, best_d = None, np.inf
     for _ in range(max(1, n_tries)):
-        # Mixture for joint-manifold *diversity* (a single rigid family is trivially
-        # separable even when its marginals match): ~40% a profile-rescaled draw from
-        # the diverse general families, else the parametric profile-guided synthesis.
-        if rng.random() < 0.4:
-            data = _general_rescaled(rng, n, C, log_scale_target)
-        elif C == 1:
-            data = _targeted_channel(rng, n, m, center)[None, :]
-        else:  # multivariate: shared seasonal/trend backbone + per-channel variation
-            backbone = _targeted_channel(rng, n, m, center)
-            data = np.stack([backbone * rng.uniform(0.6, 1.4)
-                             + rng.uniform(0.1, 0.4) * np.nanstd(backbone) * rng.normal(0, 1, n)
-                             for _ in range(C)])
-        feats = F.channel_features(data).mean(axis=0)
-        in_band = np.all((feats[list(_KEY_IDX)] >= lo[list(_KEY_IDX)])
-                         & (feats[list(_KEY_IDX)] <= hi[list(_KEY_IDX)]))
-        d = float(np.mean(((feats - center_vec) / scale) ** 2))
-        if d < best_d:
-            best, best_d = data, d
-        if in_band:
-            break
+        for gen in eligible:                           # goodness-of-fit among eligible
+            backbone = gen(rng, n, group, profile, center, m)
+            data = _shape(rng, n, C, backbone, interm, target_scale)
+            feats = F.channel_features(data, season=m).mean(axis=0)
+            d = float(np.mean(((feats - center_vec) / scale_vec) ** 2))
+            if d < best_d:
+                best, best_d = data, d
     return best.astype(np.float64), 0, best.shape[0], (m if m and m >= 2 else -1), group
-
-
-def _general_rescaled(rng, n: int, C: int, log_scale_target: float) -> np.ndarray:
-    """A draw from the diverse general families, rescaled to the group's log-scale —
-    inherits the general mixture's manifold coverage while staying profile-targeted."""
-    from . import synthetic_v2 as V
-    names, p = V.general_picker(None)
-    fam = names[int(rng.choice(len(names), p=p))]
-    if fam == "noise_robust":  # targeted family is not fixed-window; pick a plain one
-        fam = "kernelsynth"
-    data, _nf, _nt, _m, _kind, _cc, _cp = V.gen_general_series(rng, n, fam)
-    data = np.atleast_2d(np.asarray(data, dtype=np.float64))
-    cur = float(np.nanstd(data)) + 1e-8
-    target = float(np.expm1(log_scale_target)) + 1e-3
-    return data * (target / cur)
 
 
 def write_targeted_corpus(

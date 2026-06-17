@@ -253,6 +253,65 @@ def test_ks_mmd_and_evaluate_verdict():
     assert "dyn=" in res.verdict
 
 
+def test_dominant_periods_and_ar():
+    n = 1000
+    x = 3 * np.sin(2 * np.pi * np.arange(n) / 24) + np.random.default_rng(0).normal(0, 0.3, n)
+    pers = F.dominant_periods(x, k=4, season=24)
+    assert pers and abs(pers[0][0] - 24) <= 2          # recovers the period-24 cycle
+    assert abs(sum(a for _, a in pers) - 1.0) < 1e-6   # weights normalized
+    # AR(1) with coef 0.8 -> fitted phi1 near 0.8
+    rng = np.random.default_rng(1); e = rng.normal(0, 1, 2000); a = np.zeros(2000)
+    for i in range(1, 2000):
+        a[i] = 0.8 * a[i - 1] + e[i]
+    coef = F.fit_ar(a, p=2)
+    assert len(coef) == 2 and abs(coef[0] - 0.8) < 0.15
+
+
+def test_targeted_generators_predictable_and_finite():
+    # a stub profile carrying structural stats (dominant periods + AR + high kurtosis)
+    rng = np.random.default_rng(0)
+    recs = []
+    for _ in range(30):
+        n = 800
+        x = np.full(n, 0.0)
+        x[np.arange(0, n, 96)] = 8.0                   # regular spikes (period 96)
+        x = x + rng.normal(0, 0.2, n)
+        recs.append(FitRecord(feats=F.channel_features(x[None, :], season=96), freq="SPIKY",
+                              season=96, horizon=48, n_channels=1,
+                              periods=[F.dominant_periods(x, season=96)], ar=[F.fit_ar(x)]))
+    prof = TestProfile.fit(recs)
+    assert prof.dominant_periods("SPIKY")              # structural stats stored
+    # generate: must be finite; spikes must be REGULAR (predictable), not random
+    spikes = TGT._gen_regular_spikes(np.random.default_rng(1), 800, "SPIKY", prof,
+                                     dict(zip(F.FEATURE_NAMES, prof.feature_center("SPIKY"))), 96)
+    assert np.isfinite(spikes).all()
+    period = int(prof.dominant_periods("SPIKY")[0][0])
+
+    def acf_at(v, lag):
+        v = v - v.mean()
+        return float(np.dot(v[lag:], v[:-lag]) / (np.dot(v, v) + 1e-9))
+
+    # regular (predictable) spikes have positive autocorrelation at the period; a
+    # random-position spike train of the same count does not.
+    rng2 = np.random.default_rng(5); rand = np.zeros(800)
+    rand[rng2.integers(0, 800, size=800 // period)] = 8.0
+    assert acf_at(spikes, period) > 0.05
+    assert acf_at(spikes, period) > acf_at(rand, period)
+    data, nf, nt, m, g = TGT.gen_targeted(np.random.default_rng(2), prof, group="SPIKY")
+    assert np.isfinite(data).all() and nt >= 1
+
+
+def test_learnability_orders_predictable_below_noise():
+    rng = np.random.default_rng(0)
+    seasonal = [3 * np.sin(2 * np.pi * np.arange(480) / 24) + rng.normal(0, 0.3, 480)
+                for _ in range(20)]
+    noise = [rng.normal(0, 1, 480) for _ in range(20)]
+    lp = Q.series_learnability(seasonal, [24] * 20)
+    ln = Q.series_learnability(noise, [0] * 20)
+    assert np.isfinite(lp) and np.isfinite(ln)
+    assert lp < ln                                     # predictable seasonal is more forecastable
+
+
 def test_knn_c2st_and_dynamics_subset():
     rng = np.random.default_rng(0)
     A, B = rng.normal(0, 1, (200, F.N_FEATURES)), rng.normal(0, 1, (200, F.N_FEATURES))

@@ -205,3 +205,64 @@ def feature_matrix(series: Sequence[np.ndarray]) -> np.ndarray:
 
 def feature_names() -> List[str]:
     return list(FEATURE_NAMES)
+
+
+# --- structural descriptors for the per-config targeted generators (H1.5) ----
+# These are *aggregate* statistics (dominant periods, AR coefficients, trend/noise
+# fractions) used to drive PSD-matching + structural/AR synthesis. Aggregated per
+# config in the profile — never raw values (no leakage).
+
+def dominant_periods(x: Sequence[float], k: int = 6, season: int = 0) -> List[tuple]:
+    """Top-``k`` periodic components as ``(period, relative_amplitude)`` from the
+    periodogram (DC + trend removed). ``season`` (calendar period), if given, is
+    always included so a drift-dominated series still surfaces its true cycle."""
+    x = _fill_nan(np.asarray(x, dtype=np.float64).ravel())
+    n = x.size
+    if n < 8:
+        return []
+    # linear-detrend so a slow drift doesn't swamp the spectrum
+    t = np.arange(n, dtype=np.float64); tc = t - t.mean()
+    vt = float(np.dot(tc, tc))
+    if vt > _EPS:
+        x = x - (x.mean() + (np.dot(tc, x - x.mean()) / vt) * tc)
+    power = np.abs(np.fft.rfft(x - x.mean())) ** 2
+    power[0] = 0.0
+    if power.sum() < _EPS:
+        return []
+    freqs = np.arange(power.size)
+    out = {}
+    order = np.argsort(power)[::-1]
+    for fi in order:
+        if fi == 0:
+            continue
+        period = n / fi
+        if 2.0 <= period <= n / 2:
+            out[round(period)] = max(out.get(round(period), 0.0), float(power[fi]))
+        if len(out) >= k:
+            break
+    if season and season >= 2 and season <= n / 2 and round(season) not in out:
+        fi = int(round(n / season))
+        if 0 < fi < power.size:
+            out[round(season)] = float(power[fi])
+    tot = sum(out.values()) + _EPS
+    comps = sorted(((p, a / tot) for p, a in out.items()), key=lambda c: -c[1])
+    return [(int(p), float(a)) for p, a in comps[:k]]
+
+
+def fit_ar(x: Sequence[float], p: int = 2) -> List[float]:
+    """AR(``p``) coefficients via Yule-Walker (autocovariance Toeplitz solve), on the
+    standardized series. Stable-ish; returns zeros for degenerate input."""
+    x = _fill_nan(np.asarray(x, dtype=np.float64).ravel())
+    x = x - x.mean()
+    n = x.size
+    sd = x.std()
+    if n < p + 2 or sd < _EPS:
+        return [0.0] * p
+    x = x / sd
+    r = np.array([float(np.dot(x[:n - j], x[j:]) / n) for j in range(p + 1)])
+    R = np.array([[r[abs(i - j)] for j in range(p)] for i in range(p)])
+    try:
+        coef = np.linalg.solve(R + 1e-6 * np.eye(p), r[1:p + 1])
+    except np.linalg.LinAlgError:
+        return [0.0] * p
+    return [float(c) for c in np.nan_to_num(coef)]

@@ -39,6 +39,39 @@ class FitRecord:
     season: int
     horizon: int
     n_channels: int
+    periods: Optional[list] = None   # per-channel list of (period, rel_amp) lists
+    ar: Optional[list] = None        # per-channel list of AR-coef lists
+
+
+def _agg_periods(per_channel: list, k: int = 6, tol: float = 0.06) -> list:
+    """Aggregate per-channel ``(period, rel_amp)`` lists into the group's top-``k``
+    dominant periods (bucketed within ``tol`` relative tolerance), as ``(period,
+    weight)`` summing to 1 — the periodic structure the spectral generator reproduces."""
+    if not per_channel:
+        return []
+    buckets: List[list] = []  # [rep_period, total_weight, count]
+    for comps in per_channel:
+        for p, a in comps:
+            for b in buckets:
+                if abs(p - b[0]) <= tol * b[0]:
+                    b[1] += a; b[2] += 1
+                    b[0] = (b[0] * (b[2] - 1) + p) / b[2]  # running mean period
+                    break
+            else:
+                buckets.append([float(p), float(a), 1])
+    buckets.sort(key=lambda b: -b[1])
+    top = buckets[:k]
+    tot = sum(b[1] for b in top) + 1e-9
+    return [[int(round(b[0])), float(b[1] / tot)] for b in top]
+
+
+def _agg_ar(per_channel: list) -> list:
+    """Median AR coefficients across channels (the group's autocorrelation signature)."""
+    if not per_channel:
+        return []
+    p = max(len(c) for c in per_channel)
+    mat = np.array([c + [0.0] * (p - len(c)) for c in per_channel], dtype=np.float64)
+    return [float(v) for v in np.median(mat, axis=0)]
 
 
 def _marginal(values: List[int]) -> Dict[str, list]:
@@ -65,7 +98,7 @@ class TestProfile:
         by_freq: Dict[str, dict] = {}
         for r in records:
             g = by_freq.setdefault(r.freq, {"feats": [], "season": [], "horizon": [],
-                                            "C": [], "n": 0})
+                                            "C": [], "n": 0, "periods": [], "ar": []})
             g["feats"].append(np.atleast_2d(r.feats))
             if r.season > 0:
                 g["season"].append(int(r.season))
@@ -73,6 +106,10 @@ class TestProfile:
                 g["horizon"].append(int(r.horizon))
             g["C"].append(int(r.n_channels))
             g["n"] += 1
+            for ch in (r.periods or []):
+                g["periods"].append(ch)
+            for ch in (r.ar or []):
+                g["ar"].append(ch)
         groups: Dict[str, dict] = {}
         for freq, g in by_freq.items():
             feats = np.concatenate(g["feats"], axis=0)  # [sum_C, F]
@@ -89,6 +126,8 @@ class TestProfile:
                 "season": _marginal(g["season"]),
                 "horizon": _marginal(g["horizon"]),
                 "C": _marginal(g["C"]),
+                "dominant_periods": _agg_periods(g["periods"]),
+                "ar_coef": _agg_ar(g["ar"]),
             }
         return cls(groups, list(F.FEATURE_NAMES))
 
@@ -146,6 +185,12 @@ class TestProfile:
     def sample_n_channels(self, group: str, rng) -> int:
         return max(1, self._sample_marginal(group, "C", rng, default=1))
 
+    def dominant_periods(self, group: str) -> list:
+        return self.groups[group].get("dominant_periods", [])
+
+    def ar_coef(self, group: str) -> list:
+        return self.groups[group].get("ar_coef", [])
+
 
 # --- fitting from the real GIFT-Eval test set (Mac/WSL; lazy gluonts) --------
 
@@ -179,7 +224,9 @@ def fit_from_gifteval(*, local_dir: str = "", terms=_TERMS, items_per_config: in
             freq=_config_name(ev.config_id),
             season=season,
             horizon=int(ev.y_true.shape[0]) if ev.y_true is not None else 0,
-            n_channels=data.shape[0]))
+            n_channels=data.shape[0],
+            periods=[F.dominant_periods(data[c], season=season) for c in range(data.shape[0])],
+            ar=[F.fit_ar(data[c], p=2) for c in range(data.shape[0])]))
     if not records:
         raise ValueError("no GIFT-Eval test series read; check the download / local_dir")
     return TestProfile.fit(records)

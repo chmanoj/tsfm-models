@@ -690,7 +690,7 @@ one streaming loader", **toward the live loader**); (4) the **train split is inc
 **Synth-v2 H1 reconciliation (better synthetic corpus + Tier-1 quality harness — pinned, do not re-flag):**
 H1 builds a **measurably better** synthetic corpus in two tagged families + a training-free harness that
 decides whether it is better, on **one shared feature space**. Precondition G4 (shards/`synthetic_corpus`/
-`materialize`) + G5 (`auto_from_test_configs`, leaderboard). `uv run pytest` **170→188 passed, 2 skipped**
+`materialize`) + G5 (`auto_from_test_configs`, leaderboard). `uv run pytest` **170→191 passed, 2 skipped**
 (all new files + one additive seam change). **Session decisions (maintainer, asked at start):** (1) general =
 **multivariate-first** broad coverage, not a fixed recipe; (2) targeted matches the **full empirical data
 distribution**, not just freq/season/horizon/C metadata; (3) noise-robustness = **clean-horizon Path B** (below);
@@ -730,43 +730,48 @@ distractors, p≈0.3, ≤3 extra.
   GIFT-Eval config (term-stripped), the empirical *feature distribution* (per-feature quantiles) + structural marginals
   (season/horizon/C) from the real **test** contexts — **aggregate stats only, never raw values, never per-series
   matching → no leakage** (D13 "match the distribution, not the values", extended from metadata to the full feature
-  distribution). The targeted generator draws a group, samples length/season/C from its marginals, and produces a
-  **profile-conditioned mixture**: ≈40% profile-rescaled draws from the diverse general families (joint-manifold
-  coverage — a single rigid family is trivially separable even with matched marginals), else a parametric synthesis
-  tuned to the group's central features with three regimes — **multi-harmonic / von-Mises sharp-peak seasonal**,
-  **RBF-smoothed-noise + trend**, and an **impulsive spike-train** (flat baseline + periodic sharp spikes + heavy-tail
-  outliers, triggered by high `excess_kurtosis` + low seasonal variance — the server/traffic-trace pattern, e.g.
-  `bitbrains_rnd/5T`, that smooth synthesis misses). **rejection-sampled** on the key feature bands.
+  distribution). The profile additionally stores **aggregate** per-config structural signatures (**dominant periods** =
+  top-K `(period, weight)` from the averaged periodogram; **fitted AR(p)** coefficients) — still aggregate-only, no
+  values. `gen_targeted` (H1.5 rebuild) picks among three **predictable-by-construction** generators by feature-distance
+  to the config center, gated by config character: (1) **spectral/dominant-component** (sum sinusoids+harmonics at the
+  fitted periods + bounded AR noise → regular multi-harmonic periodicity); (2) **structural+AR** (level+trend+level-shift
+  +seasonal+AR(p) from fitted coeffs → trends/level-shifts/autocorrelation); (3) **regular spike-train** (flat AR baseline
+  + fixed-period, fixed-phase, near-constant-amplitude spikes → *predictable* spikes, eligible only when
+  `excess_kurtosis>0.5`). This replaced the earlier random-spike/RBF-noise synthesis after the visual showed spikes must
+  be **regular/learnable** (not random) and the crude kurtosis trigger mis-fired on seasonal configs.
   `--from-test-configs`/subset overrides supported; the committed profile is **gitignored** (rebuild/rsync as needed).
 - **(D) Tier-1 quality harness (`data/quality_harness.py`).** **C2ST** on the **`DYNAMICS_FEATURES`** subset
   (length/scale excluded → **not gameable**) as the headline + a stronger **kNN C2ST** (nonlinear; the honest, usually
   higher number) + full-feature C2ST + per-feature **KS** punch-list + **RBF-MMD** + **pure-noise control** + a
-  noise-robust **predictability floor**. Verdict is *relative* (targeted closer to test than general; noise most
-  separable) with an honest *absolute* caveat. CLI writes a markdown/JSON report.
-- **Tier-1 result (Mac CPU, seed 0), after the harness-driven iteration:** **targeted dynamics-C2ST 0.914 < general
-  0.931 < noise 0.998** (kNN: targeted 0.974 / general 0.971) — targeted is the closest-to-test family on the
-  non-gameable metric and best matches trend/kurtosis/seasonal; best dynamics-AUC≈0.91 (kNN≈0.97) is **still separable**.
-  The iteration loop (read punch-list → capture *real dynamics*, never length): calendar-period seasonality, multi-
-  harmonic/sharp seasonal, the impulsive spike mode (matched `bitbrains_rnd/5T`), diversity mix. **Open H2 levers:**
-  fine autocorrelation/spectral shape (`acf1`/`acf_diff1`/`spectral_entropy`) — candidate for per-config parameter
-  fitting. Full report + the like-for-like visual (`synth_targeted_vs_real.png`):
-  `docs/tetris/sanity_experiments/synth_v2_quality.md`. **Principle (recorded): the C2ST is a diagnostic for real
-  dynamics, never a target to minimize by superficial means (length/scale) — that would game the eval.**
+  **learnability gate** (median best-baseline MASE — seasonal-naive/last/linear — on the tail horizon: good synth is
+  forecastable like real, not random noise) + a noise-robust **predictability floor**. CLI writes a markdown/JSON report.
+- **Tier-1 result (Mac CPU, seed 0), after the per-config rebuild:** **learnability targeted 1.20 ≈ real 1.17** — the
+  rebuilt targeted is *forecastable like real* (predictable structure), the key win. **C2ST: targeted full 0.941 < general
+  0.970**; **dynamics-C2ST tied** (targeted 0.935 / general 0.933; kNN 0.991/0.973) — fine autocorrelation/spectral shape
+  (`acf1`/`acf_diff1`/`spectral_entropy`) is **still separable**, the open **H2 lever** (per-config parameter fitting /
+  matched-spectrum noise; + period×sampling-frequency decoupling). The iteration that got here (harness punch-list +
+  like-for-like visual): season-aware features → multi-harmonic/sharp seasonal → **predictable regular spikes** (matched
+  `bitbrains_rnd/5T`) → per-config dominant-period+AR fitting with goodness-of-fit regime selection. Full report + the
+  20-config visual (`synth_targeted_vs_real.png`): `docs/tetris/sanity_experiments/synth_v2_quality.md`.
+  **Principles (recorded):** the C2ST is a diagnostic for real *dynamics*, never a target to minimize via superficial
+  axes (length/scale) — that would game the eval; and **synth must be learnable** (predictable structure + bounded noise),
+  which the learnability gate enforces.
 - **`materialize` (`build_corpus_v2`, `--n-general/--n-targeted/--profile`)** writes both families (tagged
   `synth_general`/`synth_targeted`) to the v2 shard format; targeted needs a fitted `--profile`. The legacy G4
   `build_corpus` path is unchanged.
-- **Tests (18 new → `uv run pytest` 170→188 passed, 2 skipped):** `tests/test_synth_v2.py` — feature
+- **Tests (21 new → `uv run pytest` 170→191 passed, 2 skipped):** `tests/test_synth_v2.py` — feature
   determinism/finiteness/discrimination; fixed-window sampler (deterministic crop + unchanged random path);
   HintedItem→reservoir→**clean horizon GT** end-to-end; shard v2 round-trip + **v1 read-back compat**; KernelSynth-MV/
-  SDE/noise-robust shapes + the clean-vs-noisy smoothness invariant; dilution; general-corpus tags/determinism;
-  TestProfile fit/save/load + **targeted-beats-general** on seasonal overlap; C2ST/KS/MMD/AUC/verdict on stubs.
+  SDE/noise-robust shapes; dilution; general-corpus tags/determinism; TestProfile fit/save/load; dominant-periods +
+  AR-fit recovery; the three targeted generators incl. **regular (not random) spike** autocorrelation; **learnability**
+  ordering (predictable < noise); C2ST/kNN/KS/MMD/dynamics-subset on stubs.
 - **Lit-review (adopted + why):** **KernelSynth** (Chronos) — the dominant composed-GP-kernel recipe → realized
   multivariate (Mystic-B/D13-C) as the general core; **ForecastPFN/structural-TS** (trend×season×holiday) → the
   structural family; classical **SDEs/state-space** (OU/GBM/jump/ARCH) → the stochastic + noise-robust families;
-  **Chronos-Mixup**-style augmentation noted (time/scale warp) for H2. The **C2ST** (classifier two-sample test) is the
-  adopted objective overlap metric over bare MMD/KS because its null (AUC 0.5) is calibrated and its feature
-  importances/per-feature KS double as the generator punch-list. The transfer-probe (Tier-2) is the eventual
-  falsifiable bar, deferred until Tier-1 says the synth is close.
+  per-config **PSD/dominant-period + AR(Yule-Walker) fitting** → the targeted family's faithful periodicity/autocorrelation;
+  **Chronos-Mixup**-style augmentation + **period×sampling-frequency decoupling** noted for H2. The **C2ST** is the adopted
+  objective overlap metric over bare MMD/KS (calibrated null 0.5; per-feature KS = punch-list); the **learnability** gate
+  is the predictability complement; the transfer-probe (Tier-2) is the eventual falsifiable bar, deferred until close.
 
 ---
 

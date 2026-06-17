@@ -148,6 +148,44 @@ def rbf_mmd(A: np.ndarray, B: np.ndarray, *, gamma: Optional[float] = None) -> f
     return float(term_a + term_b - 2 * Kab.mean())
 
 
+# --- learnability: is the synth forecastable by simple baselines? ------------
+
+def _baseline_mase(x: np.ndarray, season: int) -> float:
+    """Best-of {seasonal-naive, last-value, linear} forecast error on the tail horizon,
+    scaled by the naive-1 in-sample diff (MASE-like). Low ⇒ the series has *predictable
+    structure*; ~1+ ⇒ a simple model can't beat naive ⇒ effectively unpredictable noise."""
+    x = np.asarray(x, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    n = x.size
+    H = int(min(max(4, season if season >= 2 else 12), max(4, n // 4)))
+    if n < 2 * H + 2:
+        return np.nan
+    ctx, y = x[:-H], x[-H:]
+    # robust scale: in-sample naive-1 diff, floored by a fraction of the series range so
+    # a near-flat series with rare spikes can't produce a divide-by-tiny blow-up.
+    scale = max(float(np.mean(np.abs(np.diff(ctx)))),
+                1e-3 * float(np.ptp(ctx)), 1e-6)
+    preds = [np.full(H, ctx[-1])]                                  # last-value
+    if season >= 2 and ctx.size >= season:                        # seasonal-naive
+        reps = int(np.ceil(H / season))
+        preds.append(np.tile(ctx[-season:], reps)[:H])
+    k = min(ctx.size, 3 * H)                                       # linear extrapolation
+    t = np.arange(k, dtype=np.float64); tc = t - t.mean()
+    vt = float(np.dot(tc, tc))
+    if vt > 1e-8:
+        slope = float(np.dot(tc, ctx[-k:] - ctx[-k:].mean()) / vt)
+        preds.append(ctx[-1] + slope * np.arange(1, H + 1))
+    return float(min(np.mean(np.abs(p - y)) / scale for p in preds))
+
+
+def series_learnability(series, seasons) -> float:
+    """**Median** best-baseline MASE over a list of series (lower = more forecastable).
+    Median (not mean) so a few hard/pathological series don't dominate the aggregate."""
+    vals = [_baseline_mase(x, int(s)) for x, s in zip(series, seasons)]
+    vals = [min(v, 20.0) for v in vals if np.isfinite(v)]          # cap per-series outliers
+    return float(np.median(vals)) if vals else float("nan")
+
+
 # --- predictability floor (noise-robust families) ----------------------------
 
 def predictability_floor(rng, n_samples: int = 200, ctx: int = 256, horizon: int = 32) -> float:
@@ -176,24 +214,31 @@ def predictability_floor(rng, n_samples: int = 200, ctx: int = 256, horizon: int
 @dataclass
 class QualityResult:
     real_n: int
-    families: Dict[str, dict] = field(default_factory=dict)  # name -> {n, c2st_auc, mmd, ks}
+    families: Dict[str, dict] = field(default_factory=dict)  # name -> {n, c2st_*, mmd, ks, learnability}
     predictability_floor: Optional[float] = None
+    real_learnability: Optional[float] = None
     verdict: str = ""
 
     def to_dict(self) -> dict:
         return {"real_n": self.real_n, "families": self.families,
-                "predictability_floor": self.predictability_floor, "verdict": self.verdict}
+                "predictability_floor": self.predictability_floor,
+                "real_learnability": self.real_learnability, "verdict": self.verdict}
 
 
 def evaluate(real_feats: np.ndarray, named_synth: Dict[str, np.ndarray], *,
-             seed: int = 0, floor: Optional[float] = None) -> QualityResult:
+             seed: int = 0, floor: Optional[float] = None,
+             learnability: Optional[Dict[str, float]] = None,
+             real_learnability: Optional[float] = None) -> QualityResult:
     """Compare each named synth feature set against the real-test feature set."""
-    res = QualityResult(real_n=int(len(real_feats)), predictability_floor=floor)
+    res = QualityResult(real_n=int(len(real_feats)), predictability_floor=floor,
+                        real_learnability=real_learnability)
+    learnability = learnability or {}
     dyn = list(F.DYNAMICS_IDX)
     real_dyn = real_feats[:, dyn]
     for name, feats in named_synth.items():
         feats = np.asarray(feats, dtype=np.float64)
         res.families[name] = {
+            "learnability": learnability.get(name),
             "n": int(len(feats)),
             # headline = the *dynamics* C2ST (length/scale excluded so it can't be
             # gamed by superficial matching); full-feature + kNN reported alongside.
@@ -234,6 +279,17 @@ def format_report(res: QualityResult) -> str:
     if res.predictability_floor is not None:
         lines += [f"Noise-robust predictability floor (irreducible RMS / scale): "
                   f"**{res.predictability_floor:.3f}**", ""]
+    if res.real_learnability is not None:
+        lines += ["## Learnability (best-baseline MASE on the tail horizon — lower = more "
+                  "forecastable; should be near real, not ≫)", "",
+                  f"real test: **{res.real_learnability:.3f}**", "",
+                  "| family | learnability |", "|---|---|"]
+        for name, v in sorted(res.families.items(),
+                              key=lambda kv: (kv[1].get("learnability") is None,
+                                              kv[1].get("learnability") or 0)):
+            lv = v.get("learnability")
+            lines.append(f"| {name} | {lv:.3f} |" if lv is not None else f"| {name} | – |")
+        lines.append("")
     lines += ["## C2ST / MMD (lower AUC = closer to test; 0.5 = indistinguishable). "
               "Headline = **dynamics** AUC (length/scale excluded — not gameable).", "",
               "| family | n | C2ST dyn | C2ST dyn (kNN) | C2ST full | RBF-MMD(dyn) |",
@@ -269,27 +325,36 @@ def main() -> None:  # pragma: no cover - manual entrypoint
     args = ap.parse_args()
 
     profile = TestProfile.load(args.profile)
-    # real-test features: live extraction (aggregate per-series stats, never values)
-    real = np.concatenate([
-        F.channel_features(ev.data_tensor.detach().cpu().numpy())
-        for ev in iter_eval_items(args.local_dir, items_per_config=args.items_per_config,
-                                  terms=("short", "medium", "long"))
-    ], axis=0)
+    # real-test features (season-aware; aggregate per-series stats, never values) + raw
+    # series/seasons for the learnability gate.
+    real, real_series, real_seasons = [], [], []
+    for ev in iter_eval_items(args.local_dir, items_per_config=args.items_per_config,
+                              terms=("short", "medium", "long")):
+        data = ev.data_tensor.detach().cpu().numpy()
+        season = int(ev.season_length) if ev.season_length else 0
+        real.append(F.channel_features(data, season=season))
+        real_series.append(data[0]); real_seasons.append(season)
+    real = np.concatenate(real, axis=0)
 
     rng = np.random.default_rng(args.seed)
-    gen, tgt, noise = [], [], []
+    feats = {"general": [], "targeted": [], "noise": []}
+    series = {"general": [], "targeted": [], "noise": []}
+    seasons = {"general": [], "targeted": [], "noise": []}
     for i in range(args.n):
         fam, p = V.general_picker(None)
         f = fam[int(rng.choice(len(fam), p=p))]
-        d = V.gen_general_series(np.random.default_rng((args.seed, 1, i)), int(rng.integers(200, 1200)), f)[0]
-        gen.append(F.channel_features(np.atleast_2d(d)))
-        td = TGT.gen_targeted(np.random.default_rng((args.seed, 2, i)), profile)[0]
-        tgt.append(F.channel_features(np.atleast_2d(td)))
-        noise.append(F.series_features(rng.normal(0, 1, int(rng.integers(200, 1200))))[None, :])
-    named = {"general": np.concatenate(gen), "targeted": np.concatenate(tgt),
-             "noise": np.concatenate(noise)}
+        gd = V.gen_general_series(np.random.default_rng((args.seed, 1, i)), int(rng.integers(200, 1200)), f)
+        feats["general"].append(F.channel_features(np.atleast_2d(gd[0]))); series["general"].append(np.atleast_2d(gd[0])[0]); seasons["general"].append(gd[3] if gd[3] > 0 else 0)
+        td, _nf, _nt, tm, _g = TGT.gen_targeted(np.random.default_rng((args.seed, 2, i)), profile)
+        feats["targeted"].append(F.channel_features(np.atleast_2d(td), season=max(0, tm))); series["targeted"].append(np.atleast_2d(td)[0]); seasons["targeted"].append(tm if tm > 0 else 0)
+        nz = rng.normal(0, 1, int(rng.integers(200, 1200)))
+        feats["noise"].append(F.series_features(nz)[None, :]); series["noise"].append(nz); seasons["noise"].append(0)
+    named = {k: np.concatenate(v) for k, v in feats.items()}
+    learn = {k: series_learnability(series[k], seasons[k]) for k in series}
     res = evaluate(real, named, seed=args.seed,
-                   floor=predictability_floor(np.random.default_rng(args.seed)))
+                   floor=predictability_floor(np.random.default_rng(args.seed)),
+                   learnability=learn,
+                   real_learnability=series_learnability(real_series, real_seasons))
     report = format_report(res)
     print(report)
     if args.report:
