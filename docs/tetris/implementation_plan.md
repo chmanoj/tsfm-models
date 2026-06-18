@@ -772,6 +772,26 @@ distractors, p≈0.3, ≤3 extra.
   **Chronos-Mixup**-style augmentation + **period×sampling-frequency decoupling** noted for H2. The **C2ST** is the adopted
   objective overlap metric over bare MMD/KS (calibrated null 0.5; per-feature KS = punch-list); the **learnability** gate
   is the predictability complement; the transfer-probe (Tier-2) is the eventual falsifiable bar, deferred until close.
+- **H1.1 update (2026-06-17) — pivot to data-driven learnable archetypes.** The "fix acf1 / make synth smoother"
+  framing was partly a stat-hack: a smooth-*random* backbone drove the acf1 gap 0.40→0.07 but **destroyed the learnable
+  pattern** (a random walk has acf1≈1 yet is unforecastable). Pivoted to **data first**: characterize real series
+  (full-series, multi-timescale, per-channel seasonal-naive) and build generators for the patterns that are actually
+  *learnable* (seasonal-naive beats last-value). New module **`data/synth_archetypes.py`**: `gen_recurring_profile`
+  (**trapezoid** rise/stay/fall daily profiles — pulse/business/double_hump/single_hump, *not* sine bells — with HF cloud
+  noise on the plateau, persistent AR(1) day-amplitude, weekly modulation, `level_frac`, active↔quiet `regime` shifts),
+  `gen_growth` (still-rising), `gen_drift_seasonal` (multi-scale weather: persistent drift + weekly + daily ripple),
+  `gen_multivariate` (composer over per-channel `(archetype,params)` tied by a **shared seasonal envelope**; the
+  parametrized superset — `tie=0`⇒independent, assignment = measured-per-config(targeted) vs sampled-proportions(general)),
+  all **parametrized by period-in-time × sampling interval** (`samples_per_cycle`). **`data/synth_archetype_recipes.py`**
+  ships validated recipes for solar/bizitobs/electricity/covid/jena + a `gen_variety` cross-product sampler + CLI.
+  Validated (seasonal-naive synth≈real + **visual-first**): solar (trapezoid pulse+HF cloud), bizitobs (business
+  trapezoid), electricity (double-hump+day-variation+regime; snaive matches real 0.35), covid (growth), jena (21-channel
+  multivariate mix, cross-corr 0.41 vs 0.40). Tests: `tests/test_synth_archetypes.py` (+9), `tests/test_synth_archetype_recipes.py` (+3).
+  **Next (methodical, 3–4 datasets/batch):** characterize remaining datasets → committed **characterizer** (auto-assign
+  archetype-by-shape + params, store per-config specs in profile, no leakage) → wire archetypes into the corpus → **critic
+  subagent + per-config learnability gate**. Full handoff + lessons: `docs/tetris/sanity_experiments/synth_targeted_smoothness_plan.md`.
+  **Lesson recorded:** visual + learnability are co-primary; never stat-hack one metric; plot the *full* series at multiple
+  timescales and *all* channels; trust the eye over stat-decompositions ([[learnable-structure-not-smooth-noise]], [[visual-first-synth-quality]]).
 
 ---
 

@@ -189,7 +189,9 @@ def _smooth_resid(rng, n: int, corr: float = 4.0) -> np.ndarray:
     """Small smooth (low-frequency) residual — never the backbone, just texture."""
     if n < 2:
         return rng.normal(0, 1, n)
-    half = int(min(max(1, round(3 * corr)), max(1, n - 1)))
+    # cap the half-width so the kernel never exceeds the series — otherwise np.convolve
+    # mode="same" returns the (longer) kernel length, not n (a real bug at large corr).
+    half = int(min(max(1, round(3 * corr)), max(1, (n - 1) // 2)))
     t = np.arange(-half, half + 1)
     k = np.exp(-0.5 * (t / corr) ** 2); k /= k.sum()
     return np.convolve(rng.normal(0, 1, n), k, mode="same")

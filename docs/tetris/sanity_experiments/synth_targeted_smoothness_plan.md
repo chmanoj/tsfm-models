@@ -1,12 +1,120 @@
 # Targeted-synth smoothness — plan of action (H1.1 working doc)
 
-**Status:** discussion captured 2026-06-16, *not yet implemented*. This doc is the
-durable handoff for the H1.1 generation work. Read it together with
-`prompts/synth_scale_H1_1.md`, the Synth-v2 H1 reconciliation block in
-`docs/tetris/implementation_plan.md`, and the Tier-1 report
-`docs/tetris/sanity_experiments/synth_v2_quality.md`. Principles:
-[[dont-game-synth-quality-metric]], [[synth-period-vs-sampling-frequency]],
-[[visual-first-synth-quality]].
+**Status (2026-06-17):** PIVOTED. The original "make synth smoother (fix acf1)" framing
+below (sections 1–7) was partly a stat-hack trap — see the update section immediately
+following. The work pivoted mid-session to **data-driven learnable archetypes**; the
+generators are built and validated on the first datasets. Read this update section first,
+then sections 1–7 for the original smoothness diagnosis (still useful background).
+Principles: [[dont-game-synth-quality-metric]], [[synth-period-vs-sampling-frequency]],
+[[visual-first-synth-quality]], [[learnable-structure-not-smooth-noise]].
+
+---
+
+## SESSION H1.1 UPDATE (2026-06-17) — pivot to data-driven learnable archetypes
+
+### What happened
+First attempt (committed `f4510e1`) chased the smoothness stat: a low-frequency
+**smooth-random** backbone drove acf1 from a 0.40 gap to 0.07. The maintainer caught that
+this **won the number but destroyed the learnable pattern** — the output looked flat /
+sine-y and lost solar's daily pulse, covid's clean rise, bitbrains' recurring spikes. A
+random walk has acf1≈1 yet is unforecastable — the exact [[dont-game-synth-quality-metric]]
+trap. We **pivoted to data first**: look at the real series, find what's *learnable*
+(seasonal-naive beats last-value), and build generators for those archetypes.
+
+### The data-driven archetypes (built + validated — `src/tetris/data/synth_archetypes.py`)
+Characterized solar, bitbrains, jena, bizitobs, covid, electricity (full-series,
+multi-timescale, per-channel seasonal-naive). Almost every **learnable** pattern is a
+**recurring profile**: a fixed within-period waveform that *repeats* (why seasonal-naive
+forecasts it), with per-day amplitude variation, weekly modulation, small residual —
+parametrized by **period-in-time × sampling interval** (solar daily = 144 smp@10T =
+24 smp@H). Generators (all with tests, `tests/test_synth_archetypes.py`):
+- `gen_recurring_profile` — **trapezoid** daily profiles (`_flat_top`: rise/stay/fall, flat
+  plateau — *not* sine bells): `pulse` (solar, zero night), `business` (bizitobs), `double_hump`
+  (electricity load), `single_hump`. Knobs: stay-length, edge taper, **HF cloud noise on the
+  plateau** (`mult_noise`), persistent AR(1) day amplitude, weekly, `level_frac`, `hf_noise`,
+  **active↔quiet `regime` shifts** (electricity busy/idle), `trend`.
+- `gen_growth` — linear/logistic/exponential, kept **still-rising** at the horizon (covid).
+- `gen_drift_seasonal` — the multi-scale weather/drift archetype (jena): slow long-correlation
+  persistent backbone + optional weekly cycle + small daily ripple + noise.
+- `gen_multivariate` — composer over per-channel `(archetype, params)` specs tied by a
+  **shared seasonal envelope** (channels co-move). The parametrized superset: `tie=0` ⇒
+  independent; assignment source = measured-per-config (targeted) vs sampled-proportions
+  (general). Validated on jena (21 heterogeneous channels: weekly / solar-pulse / drift /
+  turbulent; synth cross-corr 0.41 vs real 0.40).
+- `samples_per_cycle`, `add_sparse_spikes`.
+
+Validated (seasonal-naive synth≈real + visual): solar (trapezoid pulse + HF cloud),
+bizitobs (trapezoid business profile), electricity (double-hump + day-variation + regime
+shifts; snaive matches real 0.35), covid (growth), jena (archetype-level multivariate mix).
+The visual loop CLI is `synth_visual.py`; throwaway exploration lived in `/tmp` (the
+committed **characterizer** is a next step).
+
+### How to generate data NOW (`src/tetris/data/synth_archetype_recipes.py`)
+The validated recipes + a variety sampler are committed so the generators are usable
+today (the per-config params won't be lost in throwaway scripts).
+
+```python
+import numpy as np
+from tetris.data import synth_archetype_recipes as R
+
+# (a) reproduce a characterized config from its validated recipe (the TARGETED use).
+#     interval_min sets samples-per-cycle: solar daily = 144 @10-min, 24 @hourly.
+solar  = R.gen_from_recipe(np.random.default_rng(0), "solar", n=4000, interval_min=10)  # [1, 4000]
+jena   = R.gen_from_recipe(np.random.default_rng(0), "jena",  n=8000, interval_min=10)  # [21, 8000]
+# names: solar, bizitobs, electricity, covid, jena   (RECIPES dict)
+
+# (b) sample the archetype x params x period x sampling cross-product for WIDE VARIETY
+#     (the GENERAL use) — every draw is learnable by construction.
+for i in range(1000):
+    data, meta = R.gen_variety(np.random.default_rng((seed, i)), n=4000)   # [C, 4000], meta = the draw
+```
+Or run the CLI to write a preview + an `.npz` you can inspect / train on:
+```bash
+uv run python -m tetris.data.synth_archetype_recipes --n-series 24 --length 4000 --out /tmp/synth_variety
+```
+Building blocks live in `synth_archetypes.py`: `gen_recurring_profile` (kinds
+pulse/business/double_hump/single_hump), `gen_growth`, `gen_drift_seasonal`,
+`gen_multivariate`, `add_sparse_spikes`, `samples_per_cycle`. Variety knobs: archetype/kind,
+stay-length & edge taper, `mult_noise` (HF cloud on the plateau), `hf_noise`, `amp_jitter`/
+`amp_persist`, `weekly`, `level_frac`, `regime_prob`, `drift_corr_days`, **period × sampling
+interval**. (The recipes are hand-validated for 5 configs; the characterizer will later derive
+them per config from the real data.)
+
+### Lessons (maintainer feedback + mistakes I made — do not repeat)
+1. **Don't stat-hack one metric.** Visual + learnability are co-primary; a smooth-random
+   signal that wins acf1 is unlearnable. [[learnable-structure-not-smooth-noise]].
+2. **Learnability signal = seasonal-naive beats last-value** (sampling-invariant), compared
+   synth-vs-real *relatively* — NOT an absolute MASE threshold (fine sampling inflates MASE:
+   solar/10T MASE 5.35 yet perfectly learnable).
+3. **Plot the FULL series at multiple timescales** (full/month/week/day), never a fixed short
+   window — I mislabelled jena from a 3-day zoom of a 1-year series.
+4. **Look at ALL channels** (jena = 21 heterogeneous), not a subset.
+5. **Real daily shapes are trapezoids (rise/stay/fall), not sine bells**; zoom in before
+   calling something a "spike" (a tall narrow trapezoid looks like a spike at full scale).
+6. **Trust the eye over stat-decompositions** — a phase-average misled me on electricity
+   (it's a strong daily double-hump), a daily-only MASE mis-classified jena's spiky channels.
+
+### Next steps (proceed methodically — 3–4 datasets per batch, like this session)
+1. **Characterize the remaining datasets in batches** (full-series, multi-scale, per-channel
+   seasonal-naive, eyeball): traffic (LOOP_SEATTLE / M_DENSE / SZ_TAXI); counts/retail
+   (restaurant / car_parts / hospital / hierarchical_sales); river/births (saugeenday /
+   us_births); ett / m4 / kdd / temperature_rain / solar-D-W / bitbrains-storage. Extend the
+   archetype set only if a genuinely new shape appears.
+2. **Build the committed characterizer** (`synth_explore.py` → formalize the `/tmp` tool):
+   per config/channel, measure sampling interval, dominant period(s) **in time**, the
+   learnability/archetype classification **by shape** (not MASE alone), and noise/amplitude —
+   emit `(archetype, params)` per channel; store aggregate per-config specs in the profile
+   (no leakage) for the targeted family.
+3. **Wire archetypes into the corpus** — replace/augment `gen_targeted` to dispatch the
+   archetype generators from the stored per-config specs; keep a `general` variety family that
+   samples the archetype × param × period × sampling cross-product.
+4. **Critic subagent + per-config learnability gate** — a visual-critique agent that grades
+   real-vs-synth panels against the principles, plus a harness gate that requires
+   seasonal-naive(synth) ≈ seasonal-naive(real) per config. A config passes only when visual +
+   learnability + stats agree.
+5. Then the Tier-1 scorecard / pass-bar, and on to Tier-2.
+
+---
 
 Evidence committed alongside this doc:
 - `synth_smoothness_diagnostic.png` — per-config real (blue) vs current targeted synth
