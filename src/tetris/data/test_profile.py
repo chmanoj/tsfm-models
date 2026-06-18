@@ -191,6 +191,15 @@ class TestProfile:
     def ar_coef(self, group: str) -> list:
         return self.groups[group].get("ar_coef", [])
 
+    def targeted_knobs(self, group: str) -> Optional[dict]:
+        """Fitted per-config generator knobs (smoothness/spectral), if synth_fit has
+        written them; else ``None`` (the generator falls back to a seed from the center).
+        Aggregate parameters only — never raw values (no leakage)."""
+        return self.groups[group].get("targeted_knobs")
+
+    def set_targeted_knobs(self, group: str, knobs: dict) -> None:
+        self.groups[group]["targeted_knobs"] = dict(knobs)
+
 
 # --- fitting from the real GIFT-Eval test set (Mac/WSL; lazy gluonts) --------
 

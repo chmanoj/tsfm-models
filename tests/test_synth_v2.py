@@ -267,6 +267,55 @@ def test_dominant_periods_and_ar():
     assert len(coef) == 2 and abs(coef[0] - 0.8) < 0.15
 
 
+def test_smooth_noise_acf_increases_with_corr_len():
+    # the smoothness primitive: longer correlation length ⇒ higher lag-1 autocorrelation
+    # (smoother) — this is what removes the H1 high-frequency noise floor.
+    ai = F.FEATURE_NAMES.index("acf1")
+    acfs = [np.mean([F.series_features(
+                TGT._smooth_noise(np.random.default_rng(i), 500, cl))[ai] for i in range(6)])
+            for cl in (1.5, 5.0, 12.0)]
+    assert acfs[0] < acfs[1] < acfs[2]
+    assert acfs[2] > 0.95                                  # corr_len=12 is very smooth
+    # integrated color is near-unit-root: even higher acf1, very low stationarity
+    ti = F.FEATURE_NAMES.index("stationarity")
+    integ = F.series_features(TGT._smooth_noise(np.random.default_rng(0), 500, 5, integrated=True))
+    assert integ[ai] > 0.97 and integ[ti] < 0.1
+
+
+def test_seed_knobs_monotone_and_no_leakage():
+    # corr_len rises with acf1 (smoother target ⇒ longer correlation); integrated color
+    # only for near-unit-root configs. Reads only the aggregate center (no raw values).
+    rough = TGT.seed_knobs({"acf1": 0.4, "stationarity": 0.8})
+    smooth = TGT.seed_knobs({"acf1": 0.99, "stationarity": 0.01})
+    assert smooth.corr_len > rough.corr_len
+    assert smooth.integrated and not rough.integrated
+    assert rough.white_amp > smooth.white_amp              # noisy config keeps more jitter
+
+
+def test_out_of_window_long_period_renders_smooth_not_dropped():
+    # a period longer than the window must render as a smooth partial-cycle drift (high
+    # acf1), not be silently dropped to noise (the H1 `period<=n/2` clamp bug, lever 5).
+    ai = F.FEATURE_NAMES.index("acf1")
+    long = TGT._periodic_signal(np.random.default_rng(0), 200, [[2036, 1.0]], sharp=True)
+    assert np.any(long) and F.series_features(long)[ai] > 0.9
+
+
+def test_smooth_envelope_finite_and_smooth():
+    prof = _stub_profile()
+    center = dict(zip(F.FEATURE_NAMES, prof.feature_center("H")))
+    knobs = TGT.seed_knobs(center)
+    env = TGT._gen_smooth_envelope(np.random.default_rng(0), 600, "H", prof, center, 24, knobs)
+    assert env.shape == (600,) and np.isfinite(env).all()
+    assert F.series_features(env)[F.FEATURE_NAMES.index("acf1")] > 0.8
+
+
+def test_feature_weights_zero_superficial_and_emphasize_smoothness():
+    w = TGT.feature_weights()
+    assert w[F.FEATURE_NAMES.index("log_scale")] == 0.0
+    assert w[F.FEATURE_NAMES.index("log_length")] == 0.0
+    assert w[F.FEATURE_NAMES.index("acf1")] > w[F.FEATURE_NAMES.index("intermittency")]
+
+
 def test_targeted_generators_predictable_and_finite():
     # a stub profile carrying structural stats (dominant periods + AR + high kurtosis)
     rng = np.random.default_rng(0)
