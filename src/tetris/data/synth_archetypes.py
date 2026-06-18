@@ -42,28 +42,42 @@ def _raised_bump(phase: np.ndarray, center: float, width: float) -> np.ndarray:
     return np.exp(-0.5 * (d / max(1e-3, width)) ** 2)
 
 
+def _flat_top(phase: np.ndarray, start: float, width: float, taper: float) -> np.ndarray:
+    """A **trapezoid** (rise / stay / fall) on ``[start, start+width]``, zero elsewhere:
+    a cosine ramp up over the first ``taper`` fraction of the window, a **flat plateau at
+    1.0**, then a cosine ramp down over the last ``taper`` fraction. This is the
+    rise-stay-fall shape real daily patterns have — not a sine bell."""
+    local = (phase - start) / max(1e-6, width)
+    inw = (local >= 0) & (local <= 1)
+    lo = np.clip(local, 0.0, 1.0)
+    t = max(1e-3, taper)
+    rise = 0.5 * (1 - np.cos(np.pi * np.clip(lo / t, 0, 1)))
+    fall = 0.5 * (1 - np.cos(np.pi * np.clip((1 - lo) / t, 0, 1)))
+    return np.where(inw, np.minimum(rise, fall), 0.0)      # flat 1.0 between the tapers
+
+
 def daily_profile(rng, spc: int, kind: str) -> np.ndarray:
     """One period's **fixed within-period waveform** (length ``spc`` = samples-per-cycle),
     standardized to unit scale with a non-negative floor where the archetype demands it.
-    This is the shape that *repeats* — the learnable backbone."""
+    This is the shape that *repeats* — the learnable backbone. Profiles are **trapezoidal
+    rise/stay/fall** (a flat plateau with defined rise/fall edges), not sine bells — real
+    daily patterns ramp up, *hold*, then ramp down, rather than smoothly oscillating."""
     phase = np.linspace(0.0, 1.0, int(max(2, spc)), endpoint=False)
-    if kind == "pulse":                                   # solar: zero night, daytime bell
-        start = rng.uniform(0.20, 0.32); width = rng.uniform(0.38, 0.55)
-        local = (phase - start) / width
-        bell = np.sin(np.pi * np.clip(local, 0, 1)) ** rng.uniform(1.0, 1.8)
-        prof = np.where((local >= 0) & (local <= 1), bell, 0.0)
+    if kind == "pulse":                                   # solar: zero night, daytime plateau
+        # gradual sunrise/sunset tapers, flat midday plateau (cloud noise added later)
+        prof = _flat_top(phase, rng.uniform(0.20, 0.30), rng.uniform(0.42, 0.56),
+                         taper=rng.uniform(0.25, 0.40))
     elif kind == "business":                              # bizitobs: low night, day plateau
-        up = 1.0 / (1.0 + np.exp(-(phase - rng.uniform(0.24, 0.34)) / 0.03))
-        down = 1.0 / (1.0 + np.exp((phase - rng.uniform(0.80, 0.92)) / 0.03))
-        plateau = up * down
-        bumps = 1.0 + 0.18 * np.sin(2 * np.pi * rng.uniform(2, 4) * phase + rng.uniform(0, 6))
-        prof = 0.06 + plateau * np.clip(bumps, 0.5, None)
+        # sharper on/off edges than solar, flat business-hours plateau, small floor
+        prof = 0.05 + _flat_top(phase, rng.uniform(0.22, 0.32), rng.uniform(0.50, 0.66),
+                                taper=rng.uniform(0.08, 0.18))
     elif kind == "double_hump":                           # electricity: morning + evening peaks
         a1, a2 = rng.uniform(0.5, 0.9), rng.uniform(0.8, 1.2)
         prof = (0.35 + a1 * _raised_bump(phase, rng.uniform(0.30, 0.40), 0.06)
                 + a2 * _raised_bump(phase, rng.uniform(0.72, 0.82), 0.07))
-    else:                                                 # single_hump: one daytime hump
-        prof = 0.15 + _raised_bump(phase, rng.uniform(0.4, 0.6), rng.uniform(0.10, 0.18))
+    else:                                                 # single_hump: one daytime plateau
+        prof = 0.12 + _flat_top(phase, rng.uniform(0.30, 0.45), rng.uniform(0.25, 0.45),
+                                taper=rng.uniform(0.30, 0.5))
     return prof
 
 
@@ -92,12 +106,14 @@ def _persistent_amp(rng, n_days: int, jitter: float, persist: float) -> np.ndarr
 def gen_recurring_profile(
     rng, n: int, spc: int, *, kind: Optional[str] = None, weekly: bool = True,
     amp_jitter: float = 0.18, amp_persist: float = 0.8, noise_amp: float = 0.04,
-    trend: float = 0.0,
+    mult_noise: float = 0.0, level_frac: float = 0.0, trend: float = 0.0,
 ) -> Tuple[np.ndarray, int, str]:
     """A **recurring daily profile**: a fixed ``daily_profile`` repeated every ``spc``
     samples, scaled per day by an **autocorrelated** amplitude (``amp_persist`` →
-    cross-day persistence + *different heights*, same shape), modulated weekly, plus a
-    tiny smooth residual and an optional slow trend.
+    cross-day persistence + *different heights*, same shape), modulated weekly, blended
+    with an optional **persistent slow level** (``level_frac`` — a smooth multi-day random
+    walk that dominates a modest daily ripple, as in electricity load where last-value ≈
+    seasonal-naive), plus a tiny smooth residual and an optional slow trend.
 
     Both baselines that work on the real data work here *by construction*: seasonal-naive
     (the profile repeats) **and** last-value (the level persists). Returns
@@ -110,6 +126,18 @@ def gen_recurring_profile(
     if weekly:
         day_amp = day_amp * _weekly_factor(rng, n_days)
     series = np.concatenate([day_amp[d] * profile for d in range(n_days)])[:n]
+    if mult_noise > 0:
+        # per-day intra-day texture (e.g. solar cloud cover): a sub-daily smooth factor
+        # that varies day to day and occasionally dips to ~0, so the daytime "stay" phase
+        # is noisy and sometimes falls to flat — not a clean bell. Multiplicative, so the
+        # zero night stays zero. Clouds differ each day ⇒ not part of the repeating profile.
+        factor = np.clip(1.0 + mult_noise * S._standardize(_smooth_resid(rng, n, corr=max(1.5, spc / 48))),
+                         0.0, 1.4)
+        series = series * factor
+    lf = float(np.clip(level_frac, 0.0, 0.95))
+    if lf > 0:                                            # persistent level + modest ripple
+        level = S._standardize(np.cumsum(_smooth_resid(rng, n, corr=max(4.0, spc / 3))))
+        series = (1 - lf) * S._standardize(series) + lf * level
     if trend:                                             # optional slow drift of the level
         series = series + trend * np.linspace(0, 1, n)
     resid = noise_amp * S._standardize(_smooth_resid(rng, n))

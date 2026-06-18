@@ -57,6 +57,16 @@ def test_pulse_profile_has_zero_floor():
     assert prof.min() >= -1e-9 and (prof <= 1e-6).mean() > 0.3   # a real off/night fraction
 
 
+def test_profiles_are_trapezoids_not_bells():
+    # rise/stay/fall: the on-region must have a genuine FLAT plateau (a run of samples at
+    # the max), which a sine bell does not — only its single peak reaches the max.
+    for kind in ("pulse", "business"):
+        prof = A.daily_profile(np.random.default_rng(1), 288, kind)
+        peak = prof.max()
+        plateau_frac = float(np.mean(prof >= 0.98 * peak))
+        assert plateau_frac > 0.10, f"{kind}: plateau {plateau_frac:.2f} too narrow (bell-like)"
+
+
 def test_growth_still_rising_linear_beats_last():
     # growth (covid) is still rising at the horizon ⇒ linear extrapolation beats a flat
     # last-value forecast (a saturated curve would wrongly favour last-value).
