@@ -105,9 +105,18 @@ them per config from the real data.)
    learnability/archetype classification **by shape** (not MASE alone), and noise/amplitude —
    emit `(archetype, params)` per channel; store aggregate per-config specs in the profile
    (no leakage) for the targeted family.
-3. **Wire archetypes into the corpus** — replace/augment `gen_targeted` to dispatch the
-   archetype generators from the stored per-config specs; keep a `general` variety family that
-   samples the archetype × param × period × sampling cross-product.
+3. **Wire archetypes into the corpus** — DONE for the variety family: `write_archetype_corpus`
+   (`synth_archetype_recipes.py`) + `materialize --n-archetype N` write a `synth_archetype`
+   shard corpus from `gen_variety`. Still TODO: a `gen_targeted` path that dispatches the
+   archetype generators from stored per-config specs (after the characterizer).
+   - **Immediate next: the 20M validation run (WSL).** Generate the corpus
+     (`uv run python -m tetris.data.materialize --out outputs/corpus_archetype --n-archetype 50000`),
+     then a config that **trains a ~20M model on that corpus (streaming loader)** and **evals
+     zero-shot on the GIFT-Eval *test* split, 10 items/config** (both the 5 characterized
+     datasets and all 97). Base the config on `configs/streaming_synth.yaml` (streaming loader
+     on `corpus_archetype`) + the curriculum config's GIFT-Eval-test eval block; scale
+     `model.d_model` to ~20M params. The eval wiring is the part to get right (a wrong eval
+     block wastes a GPU run), so build it deliberately, not blind.
 4. **Critic subagent + per-config learnability gate** — a visual-critique agent that grades
    real-vs-synth panels against the principles, plus a harness gate that requires
    seasonal-naive(synth) ≈ seasonal-naive(real) per config. A config passes only when visual +
