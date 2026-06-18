@@ -88,6 +88,35 @@ def test_growth_still_rising_linear_beats_last():
         assert lin < last
 
 
+def test_drift_seasonal_weekly_vs_drift_character():
+    # the weekly variant is forecastable by weekly seasonal-naive; the pure-drift variant
+    # is not (last-value wins) — the two jena channel characters.
+    def avg(weekly_amp, noise):
+        ls, ss = [], []
+        for k in range(4):
+            x = A.gen_drift_seasonal(np.random.default_rng(k), 6000, 24,
+                                     weekly_amp=weekly_amp, noise_amp=noise)[0]
+            last, sn, _ = _baselines(x, 24 * 7)
+            ls.append(last); ss.append(sn)
+        return np.mean(ls), np.mean(ss)
+    last_w, sn_w = avg(1.0, 0.05)
+    assert sn_w < 0.7 * last_w                            # weekly cycle is learnable
+    last_d, sn_d = avg(0.0, 0.1)
+    assert last_d <= sn_d * 1.1                           # no weekly help; persistence wins
+
+
+def test_multivariate_shape_and_shared_envelope():
+    specs = [("drift_seasonal", dict(weekly_amp=0.7))] * 4 + [("spikes", dict())] * 2
+    tied = A.gen_multivariate(np.random.default_rng(0), 4000, 24, specs, tie=0.6)
+    indep = A.gen_multivariate(np.random.default_rng(0), 4000, 24, specs, tie=0.0)
+    assert tied.shape == (6, 4000) and np.isfinite(tied).all()
+
+    def offcorr(M):
+        c = np.corrcoef(M); return float(np.nanmean(np.abs(c[np.triu_indices_from(c, 1)])))
+    # the shared envelope makes tied channels co-move more than independent ones
+    assert offcorr(tied) > offcorr(indep) + 0.1
+
+
 def test_samples_per_cycle_decoupling():
     # a 1-day cycle is 144 samples at 10-min and 24 at hourly (period x sampling freq).
     assert A.samples_per_cycle(1440, 10) == 144

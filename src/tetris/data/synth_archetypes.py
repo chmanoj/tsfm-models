@@ -195,6 +195,34 @@ def _smooth_resid(rng, n: int, corr: float = 4.0) -> np.ndarray:
     return np.convolve(rng.normal(0, 1, n), k, mode="same")
 
 
+def gen_drift_seasonal(
+    rng, n: int, spc: int, *, drift_corr_days: float = 8.0, weekly_amp: float = 0.0,
+    daily_amp: float = 0.0, noise_amp: float = 0.12,
+) -> Tuple[np.ndarray, int]:
+    """The **multi-scale weather/drift** archetype (jena): a slow long-correlation drift
+    backbone (the seasonal swing, which over a short forecast context reads as persistent
+    drift — last-value/linear learnable) + an optional **weekly** recurring cycle
+    (``weekly_amp`` — seasonal-naive-at-weekly learnable, as on jena humidity/pressure) +
+    an optional small **daily** ripple + noise. Pure-drift channels set the cycle
+    amplitudes to 0. Returns ``(series[n], weekly_season=7*spc)``.
+
+    The backbone is *persistent* (smooth, long correlation), not a random walk that drifts
+    away — so last-value forecasts the short horizon well, the way the real channels do."""
+    spc = int(max(2, spc))
+    drift = S._standardize(_smooth_resid(rng, n, corr=max(2.0, drift_corr_days * spc)))
+    out = drift
+    if weekly_amp > 0:                                    # fixed weekly profile, repeated
+        wk_spc = 7 * spc
+        wk_profile = S._standardize(_smooth_resid(rng, wk_spc, corr=max(2.0, wk_spc / 12)))
+        reps = int(np.ceil(n / wk_spc))
+        out = out + weekly_amp * np.tile(wk_profile, reps)[:n]
+    if daily_amp > 0:                                     # small smooth daily oscillation
+        phase = 2 * np.pi * np.arange(n) / spc + rng.uniform(0, 2 * np.pi)
+        out = out + daily_amp * np.sin(phase)
+    out = S._standardize(out) + noise_amp * S._standardize(_smooth_resid(rng, n, corr=2.0))
+    return out.astype(np.float64), 7 * spc
+
+
 def gen_growth(rng, n: int, *, kind: Optional[str] = None, noise_amp: float = 0.04
                ) -> Tuple[np.ndarray, str]:
     """Clean **trend/growth** (covid): linear / logistic / exponential + small residual.
@@ -213,6 +241,42 @@ def gen_growth(rng, n: int, *, kind: Optional[str] = None, noise_amp: float = 0.
         g = np.expm1(rng.uniform(1.5, 3.5) * t) / np.expm1(rng.uniform(1.5, 3.5))
     g = S._standardize(g)
     return (g + noise_amp * S._standardize(_smooth_resid(rng, n))).astype(np.float64), kind
+
+
+def gen_channel(rng, n: int, spc: int, archetype: str, params: dict) -> np.ndarray:
+    """Generate one channel from a named archetype (dispatch over the generators)."""
+    p = dict(params or {})
+    if archetype == "recurring":
+        return gen_recurring_profile(rng, n, spc, **p)[0]
+    if archetype == "drift_seasonal":
+        return gen_drift_seasonal(rng, n, spc, **p)[0]
+    if archetype == "growth":
+        return gen_growth(rng, n, **p)[0]
+    if archetype == "spikes":
+        base = gen_drift_seasonal(rng, n, spc, weekly_amp=p.get("weekly_amp", 0.0),
+                                  noise_amp=p.get("noise_amp", 0.05))[0]
+        return add_sparse_spikes(rng, base, spc, rate_per_day=p.get("rate_per_day", 0.4),
+                                 amp=p.get("amp", 6.0))
+    raise ValueError(f"unknown archetype {archetype!r}")
+
+
+def gen_multivariate(rng, n: int, spc: int, channel_specs, *, tie: float = 0.4
+                     ) -> np.ndarray:
+    """Compose a ``[C, n]`` multivariate series from a list of per-channel
+    ``(archetype, params)`` specs, tied together by a **shared slow seasonal envelope**
+    (``tie`` = how much of each channel co-moves with the common envelope — real
+    multivariate weather/load channels share the season). ``tie=0`` ⇒ independent
+    channels. The channel-archetype *assignment* is the only thing that differs between
+    the targeted use (measured per real config) and the general use (sampled proportions);
+    the composition is identical."""
+    shared = S._standardize(_smooth_resid(rng, n, corr=max(2.0, 8.0 * spc)))  # common season
+    tie = float(np.clip(tie, 0.0, 0.95))
+    out = np.empty((len(channel_specs), n), dtype=np.float64)
+    for c, (arch, params) in enumerate(channel_specs):
+        x = S._standardize(gen_channel(rng, n, spc, arch, params))
+        sign = 1.0 if rng.random() < 0.5 else -1.0        # channels co- or anti-move
+        out[c] = S._standardize((1 - tie) * x + tie * sign * shared)
+    return out
 
 
 def samples_per_cycle(period_minutes: float, interval_minutes: float) -> int:
