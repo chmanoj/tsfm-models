@@ -126,6 +126,26 @@ def gen_variety(rng, n: int) -> Tuple[np.ndarray, dict]:
                                      "period_min": period, "spc": spc, "C": data.shape[0]}
 
 
+def write_archetype_corpus(writer, *, n_series: int, seed: int = 0,
+                           length_range: Tuple[int, int] = (512, 4096),
+                           source: str = "synth_archetype") -> int:
+    """Generate ``n_series`` varied learnable-archetype series and feed them to a
+    ``ShardWriter`` (same interface as ``write_general_corpus``). All channels are
+    targets (``nf=0``); ``season_length`` is the samples-per-cycle. Deterministic:
+    series ``idx`` keyed by ``(seed, marker, idx)``."""
+    import numpy as _np
+    lo, hi = int(length_range[0]), int(length_range[1])
+    for idx in range(int(n_series)):
+        rng = _np.random.default_rng((int(seed), 0xA3C7, idx))
+        n = int(rng.integers(lo, hi + 1))
+        data, meta = gen_variety(rng, n)
+        data = _np.ascontiguousarray(_np.atleast_2d(data), dtype=_np.float32)
+        C = data.shape[0]
+        writer.add(data, 0, C, season_length=int(meta["spc"]), source=source,
+                   kind=str(meta["family"]), item_id=f"arch_{idx}")
+    return int(n_series)
+
+
 def main() -> None:  # pragma: no cover - manual entrypoint / produces artifacts
     import argparse
     from pathlib import Path

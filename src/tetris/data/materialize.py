@@ -59,6 +59,7 @@ def build_corpus_v2(
     *,
     n_general: int = 20000,
     n_targeted: int = 0,
+    n_archetype: int = 0,
     profile_path: Optional[str] = None,
     seed: int = 0,
     shard_size: int = 2500,
@@ -71,9 +72,14 @@ def build_corpus_v2(
     a fitted ``--profile`` (``tetris.data.test_profile``)."""
     from .synthetic_v2 import write_general_corpus
     builder = dict(seed=seed, n_general=n_general, n_targeted=n_targeted,
-                   shard_size=shard_size, length_range=list(length_range),
+                   n_archetype=n_archetype, shard_size=shard_size,
+                   length_range=list(length_range),
                    dilution_prob=dilution_prob, profile=profile_path or "")
     with ShardWriter(out, shard_size=shard_size, builder=builder) as w:
+        if n_archetype > 0:                              # H1.1 learnable-archetype family
+            from .synth_archetype_recipes import write_archetype_corpus
+            write_archetype_corpus(w, n_series=n_archetype, seed=seed,
+                                   length_range=length_range)
         if n_general > 0:
             write_general_corpus(w, n_series=n_general, seed=seed,
                                  length_range=length_range,
@@ -102,14 +108,17 @@ def main() -> None:  # pragma: no cover - manual entrypoint
     # synth-v2 (H1): general + targeted families. When either is >0 the v2 path runs.
     ap.add_argument("--n-general", type=int, default=0, help="synth_general count (H1)")
     ap.add_argument("--n-targeted", type=int, default=0, help="synth_targeted count (H1)")
+    ap.add_argument("--n-archetype", type=int, default=0,
+                    help="learnable-archetype count (H1.1; gen_variety cross-product)")
     ap.add_argument("--profile", default=None, help="TestProfile JSON (needed for targeted)")
     ap.add_argument("--dilution-prob", type=float, default=0.3)
     ap.add_argument("--dilution-max-extra", type=int, default=3)
     args = ap.parse_args()
 
-    if args.n_general or args.n_targeted:
+    if args.n_general or args.n_targeted or args.n_archetype:
         manifest = build_corpus_v2(
             args.out, n_general=args.n_general, n_targeted=args.n_targeted,
+            n_archetype=args.n_archetype,
             profile_path=(os.path.expanduser(args.profile) if args.profile else None),
             seed=args.seed, shard_size=args.shard_size,
             dilution_prob=args.dilution_prob, dilution_max_extra=args.dilution_max_extra)
