@@ -67,6 +67,17 @@ def test_profiles_are_trapezoids_not_bells():
         assert plateau_frac > 0.10, f"{kind}: plateau {plateau_frac:.2f} too narrow (bell-like)"
 
 
+def test_regime_shifts_produce_quiet_stretches():
+    # active<->quiet regimes: a long quiet (low-amplitude) stretch must appear, and it is
+    # a *persistent* stretch (not isolated low points), matching real busy/idle load.
+    env = A._regime_envelope(np.random.default_rng(2), 400, switch_prob=0.04)
+    assert env.min() < 0.4 and env.max() >= 0.99          # both regimes occur
+    # the quiet regime persists: many consecutive low days, not single dips
+    low = env < 0.5
+    runs = np.diff(np.where(np.diff(np.r_[0, low.astype(int), 0]))[0])[::2]
+    assert runs.size and runs.max() > 5
+
+
 def test_growth_still_rising_linear_beats_last():
     # growth (covid) is still rising at the horizon ⇒ linear extrapolation beats a flat
     # last-value forecast (a saturated curve would wrongly favour last-value).

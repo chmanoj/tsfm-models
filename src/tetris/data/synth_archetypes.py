@@ -90,6 +90,20 @@ def _weekly_factor(rng, n_days: int, *, weekend_low=(0.5, 0.85)) -> np.ndarray:
     return wk[np.arange(n_days) % 7]
 
 
+def _regime_envelope(rng, n_days: int, switch_prob: float,
+                     quiet=(0.08, 0.3)) -> np.ndarray:
+    """A persistent **active↔quiet** regime multiplier over days: stays in a regime for a
+    stretch, occasionally switching between full activity (1.0) and a quiet low-usage level
+    — the busy-then-flat structure real load/usage series show (electricity meters going
+    idle). Piecewise-constant (sharp transitions, as in the real data)."""
+    env = np.ones(int(max(1, n_days))); state = 1.0
+    for d in range(env.size):
+        if rng.random() < switch_prob:
+            state = float(rng.uniform(*quiet)) if state >= 0.99 else 1.0
+        env[d] = state
+    return env
+
+
 def _persistent_amp(rng, n_days: int, jitter: float, persist: float) -> np.ndarray:
     """Per-day amplitude as an AR(1) around 1.0 — *autocorrelated* across days so the
     level persists (last-value forecasts well, as in real load data), while the daily
@@ -106,7 +120,8 @@ def _persistent_amp(rng, n_days: int, jitter: float, persist: float) -> np.ndarr
 def gen_recurring_profile(
     rng, n: int, spc: int, *, kind: Optional[str] = None, weekly: bool = True,
     amp_jitter: float = 0.18, amp_persist: float = 0.8, noise_amp: float = 0.04,
-    mult_noise: float = 0.0, level_frac: float = 0.0, trend: float = 0.0,
+    hf_noise: float = 0.0, mult_noise: float = 0.0, level_frac: float = 0.0,
+    regime_prob: float = 0.0, trend: float = 0.0,
 ) -> Tuple[np.ndarray, int, str]:
     """A **recurring daily profile**: a fixed ``daily_profile`` repeated every ``spc``
     samples, scaled per day by an **autocorrelated** amplitude (``amp_persist`` →
@@ -125,6 +140,8 @@ def gen_recurring_profile(
     day_amp = _persistent_amp(rng, n_days, amp_jitter, amp_persist)  # persistent heights
     if weekly:
         day_amp = day_amp * _weekly_factor(rng, n_days)
+    if regime_prob > 0:                                  # active↔quiet usage regimes
+        day_amp = day_amp * _regime_envelope(rng, n_days, regime_prob)
     series = np.concatenate([day_amp[d] * profile for d in range(n_days)])[:n]
     if mult_noise > 0:
         # per-day intra-day texture (e.g. solar cloud cover): a sub-daily smooth factor
@@ -136,12 +153,19 @@ def gen_recurring_profile(
         series = series * factor
     lf = float(np.clip(level_frac, 0.0, 0.95))
     if lf > 0:                                            # persistent level + modest ripple
-        level = S._standardize(np.cumsum(_smooth_resid(rng, n, corr=max(4.0, spc / 3))))
+        # a long-correlation (multi-day), *non-integrated* level: it wanders over weeks
+        # but is nearly flat over any single day, so last-value forecasts it well (as in
+        # real electricity load, last-MASE 0.37). A random walk (cumsum) would drift too
+        # much over a 24h horizon (~sqrt(H)) and break that persistence.
+        level = S._standardize(_smooth_resid(rng, n, corr=max(2.0 * spc, 4.0)))
         series = (1 - lf) * S._standardize(series) + lf * level
     if trend:                                             # optional slow drift of the level
         series = series + trend * np.linspace(0, 1, n)
-    resid = noise_amp * S._standardize(_smooth_resid(rng, n))
-    out = series + resid
+    series = S._standardize(series)
+    # high-frequency (white) volatility — large hour-to-hour 1-step diffs on a persistent
+    # level, as in real electricity load (it is what makes both last-value and
+    # seasonal-naive read similar MASE there); separate from the smooth low-freq residual.
+    out = series + hf_noise * rng.normal(0, 1, n) + noise_amp * S._standardize(_smooth_resid(rng, n))
     return out.astype(np.float64), spc, kind
 
 
