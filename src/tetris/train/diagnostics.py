@@ -27,10 +27,11 @@ from ..normalize import horizon_invert
 
 
 def _q(v: torch.Tensor, qs) -> torch.Tensor:
-    """Quantiles of a 1-D float tensor (empty -> NaNs)."""
+    """Quantiles of a 1-D float tensor (empty -> NaNs). The ``q`` tensor must live on
+    the input's device (CUDA quantile rejects a CPU ``q``)."""
     if v.numel() == 0:
         return torch.full((len(qs),), float("nan"))
-    return torch.quantile(v.float(), torch.tensor(qs, dtype=torch.float32))
+    return torch.quantile(v.float(), torch.tensor(qs, dtype=torch.float32, device=v.device))
 
 
 @torch.no_grad()
