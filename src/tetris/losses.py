@@ -22,7 +22,7 @@ post-S8 reconciliation note). ``loss_target`` (config) is therefore not yet wire
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 import torch
 
@@ -35,6 +35,11 @@ class LossBreakdown:
     horizon: torch.Tensor             # scalar
     aux_total: torch.Tensor           # scalar (Σ_k w_k · aux_k)
     aux_per_tier: List[torch.Tensor]  # 6 × scalar (unweighted aux MAE per tier)
+    # Training-step telemetry (G1 per-step logging), filled by ``train_step`` — not
+    # part of the loss math. ``grad_norm`` is the pre-clip global grad norm; ``diag``
+    # is an optional dict of horizon diagnostics (z-space + real-space, composition).
+    grad_norm: Optional[torch.Tensor] = None
+    diag: Optional[dict] = None
 
 
 def _masked_mae(err_abs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

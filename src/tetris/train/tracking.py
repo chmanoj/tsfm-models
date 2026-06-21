@@ -28,11 +28,12 @@ log = logging.getLogger("tetris.tracking")
 
 
 class Tracker(Protocol):
-    """Minimal sink: the config once, scalars (+ images) per step, finish at the end."""
+    """Minimal sink: the config once, scalars (+ images/tables) per step, finish."""
 
     def log_config(self, config: dict) -> None: ...
     def log_scalars(self, scalars: dict, *, step: int) -> None: ...
     def log_image(self, key: str, path, *, step: int) -> None: ...
+    def log_table(self, key: str, columns, rows, *, step: int) -> None: ...
     def finish(self) -> None: ...
 
 
@@ -46,6 +47,9 @@ class NullTracker:
         pass
 
     def log_image(self, key: str, path, *, step: int) -> None:
+        pass
+
+    def log_table(self, key: str, columns, rows, *, step: int) -> None:
         pass
 
     def finish(self) -> None:
@@ -72,6 +76,15 @@ class WandbTracker:
             self._run.log({key: self._wandb.Image(str(path))}, step=step)
         except Exception as e:  # pragma: no cover - wandb/image edge cases
             log.warning("tracker.log_image(%r) failed: %s", key, e)
+
+    def log_table(self, key: str, columns, rows, *, step: int) -> None:
+        """Log a sortable table (e.g. the per-config leaderboard breakdown).
+        Best-effort: a table problem never crashes a run."""
+        try:
+            self._run.log({key: self._wandb.Table(columns=list(columns), data=[list(r) for r in rows])},
+                          step=step)
+        except Exception as e:  # pragma: no cover - wandb/table edge cases
+            log.warning("tracker.log_table(%r) failed: %s", key, e)
 
     def finish(self) -> None:
         self._run.finish()
@@ -187,3 +200,68 @@ def eval_scalars(result, *, prefix: str = "eval/") -> dict:
         return {f"{prefix}{k}": float(v) for k, v in result.items()
                 if isinstance(v, (int, float)) and not math.isnan(float(v))}
     return {f"{prefix}test_loss": float(result)}
+
+
+# Columns of the per-config leaderboard table (G1 per-eval diagnostics).
+PER_CONFIG_COLUMNS = ["config_id", "model_mase", "snaive_mase", "skill",
+                      "fc_ctx_ratio", "n_items", "n_channel_items"]
+
+
+def _finite(xs):
+    return [x for x in xs if isinstance(x, (int, float)) and math.isfinite(float(x))]
+
+
+def _pct(xs, q):
+    """Plain percentile of a list (no numpy dep); empty -> NaN."""
+    s = sorted(xs)
+    if not s:
+        return float("nan")
+    i = min(len(s) - 1, max(0, int(round(q * (len(s) - 1)))))
+    return s[i]
+
+
+def eval_tail_scalars(result, *, prefix: str = "eval/") -> dict:
+    """Tail/blowup summary from a leaderboard ``per_config`` dict (G1).
+
+    The headline geo-mean hides which configs are pathological. This derives, across
+    configs: the MASE spread (median/p90/max), how many configs are worse than
+    seasonal-naive (skill>1) or blowing up (skill>10), and the extrapolation ratio
+    (max/median forecast-vs-context magnitude) — the "why it exploded" signals. Pure
+    post-processing of ``per_config``; ``{}`` if absent. NaNs dropped by the caller."""
+    pc = result.get("per_config") if isinstance(result, dict) else None
+    if not pc:
+        return {}
+    mases = _finite(d.get("model_mase") for d in pc.values())
+    skills = _finite(d.get("skill") for d in pc.values())
+    ratios = _finite(d.get("fc_ctx_ratio") for d in pc.values())
+    out = {
+        f"{prefix}mase_median": _pct(mases, 0.5),
+        f"{prefix}mase_p90": _pct(mases, 0.9),
+        f"{prefix}mase_max": max(mases) if mases else float("nan"),
+        f"{prefix}n_skill_gt1": float(sum(1 for s in skills if s > 1)),
+        f"{prefix}n_skill_gt10": float(sum(1 for s in skills if s > 10)),
+        f"{prefix}fc_ctx_ratio_max": max(ratios) if ratios else float("nan"),
+        f"{prefix}fc_ctx_ratio_median": _pct(ratios, 0.5),
+    }
+    return {k: v for k, v in out.items() if isinstance(v, (int, float)) and math.isfinite(v)}
+
+
+def per_config_rows(result, *, top: int = 0):
+    """Rows for the per-config leaderboard table, worst skill first (G1).
+
+    Returns ``(columns, rows)`` aligned to :data:`PER_CONFIG_COLUMNS`; ``top`` caps
+    the row count (0 = all). ``([], [])`` if the result carries no ``per_config``."""
+    pc = result.get("per_config") if isinstance(result, dict) else None
+    if not pc:
+        return PER_CONFIG_COLUMNS, []
+    def _skill(kv):
+        s = kv[1].get("skill", float("nan"))
+        nan = s != s
+        return (nan, -s if not nan else 0.0)  # worst (highest) skill first, NaN last
+    rows = []
+    for cid, d in sorted(pc.items(), key=_skill):
+        rows.append([cid, d.get("model_mase"), d.get("snaive_mase"), d.get("skill"),
+                     d.get("fc_ctx_ratio"), d.get("n_items"), d.get("n_channel_items")])
+    if top:
+        rows = rows[:top]
+    return PER_CONFIG_COLUMNS, rows

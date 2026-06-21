@@ -382,6 +382,7 @@ def _score_item(forward, item: EvalItem, params, *, d_model: int, p_out: int,
     context = item.data_tensor                                            # [C, t_ctx]
     model_mases: List[float] = []
     snaive_mases: List[float] = []
+    fc_ctx_ratios: List[float] = []
     for ti in range(nt):
         # per-channel seasonality (multi-freq sanity); falls back to series m
         m = int(item.channel_seasons[nf + ti]) if item.channel_seasons else int(item.season_length)
@@ -398,7 +399,18 @@ def _score_item(forward, item: EvalItem, params, *, d_model: int, p_out: int,
         snaive = seasonal_naive_forecast(ctx_c, m, yt.shape[0])
         model_mases.append(mase(yt[valid], fc[valid], denom))
         snaive_mases.append(mase(yt[valid], snaive[valid], denom))
-    return model_mases, snaive_mases
+        # Blowup attribution (G1): how far past the context's own magnitude does the
+        # forecast reach? A ratio ≫1 means the model is extrapolating to values it
+        # never saw — the actionable "why MASE exploded" signal for synth gaps. NaN/inf
+        # forecasts map to +inf (a blowup, not dropped). Centered on the anchor so a
+        # large DC offset doesn't mask it.
+        ctx_obs = ctx_c[torch.isfinite(ctx_c)]
+        if ctx_obs.numel():
+            a = ctx_obs.median()
+            ctx_span = (ctx_obs - a).abs().max().clamp_min(1e-12)
+            fc_span = (fc - a).abs().max()           # inf if the forecast blew up
+            fc_ctx_ratios.append(float(fc_span / ctx_span))
+    return model_mases, snaive_mases, fc_ctx_ratios
 
 
 @torch.no_grad()
@@ -486,6 +498,7 @@ def evaluate_leaderboard(
     seen: dict = {}        # config_id -> items scored so far (for the per-config cap)
     model_by_cfg: dict = {}
     snaive_by_cfg: dict = {}
+    ratio_by_cfg: dict = {}
     skipped = 0
     for item in loader:
         cid = item.config_id
@@ -500,6 +513,7 @@ def evaluate_leaderboard(
         seen[cid] = seen.get(cid, 0) + 1
         model_by_cfg.setdefault(cid, []).extend(scored[0])
         snaive_by_cfg.setdefault(cid, []).extend(scored[1])
+        ratio_by_cfg.setdefault(cid, []).extend(scored[2])
 
     per_config: dict = {}
     config_model: List[float] = []
@@ -507,12 +521,16 @@ def evaluate_leaderboard(
     for cid in sorted(model_by_cfg):
         m_g = _gmean(model_by_cfg[cid])
         s_g = _gmean(snaive_by_cfg[cid])
+        ratios = ratio_by_cfg.get(cid, [])
         per_config[cid] = {
             "model_mase": m_g,
             "snaive_mase": s_g,
             "skill": (m_g / s_g) if s_g and s_g == s_g else float("nan"),
             "n_items": seen.get(cid, 0),
             "n_channel_items": len(model_by_cfg[cid]),
+            # max forecast/context magnitude ratio over this config's items — the
+            # extrapolation-blowup signal (≫1 ⇒ model predicting out-of-context values).
+            "fc_ctx_ratio": max(ratios) if ratios else float("nan"),
         }
         # A config enters the cross-config geo-mean iff it had >=1 *scorable*
         # channel-item (i.e. some held-out data). A model-poisoned config (NaN/inf

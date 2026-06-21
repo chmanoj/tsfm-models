@@ -66,6 +66,14 @@ def resolve_device(name: str) -> str:
     return name
 
 
+def resolve_log_every(cfg, eval_every: int) -> int:
+    """Train-metric log cadence (G1): ``cfg.run.log_every`` if pinned (>0), else the
+    auto default ``min(eval_every//5, 50)`` — frequent enough to see the curve, but
+    never coarser than a fifth of the eval cadence on small runs."""
+    pinned = int(getattr(cfg.run, "log_every", 0) or 0)
+    return pinned if pinned > 0 else min(max(1, eval_every // 5), 50)
+
+
 def _fmt(r: dict) -> str:
     return (f"model_MASE={r['model_mase']:.4f}  snaive_MASE={r['snaive_mase']:.4f}  "
             f"skill={r['skill']:.4f}  (n={r['n']})")
@@ -171,7 +179,7 @@ def run_sanity(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     log.info("step %5d (random init): %s", 0, _fmt(base))
     tracker.log_scalars(eval_scalars(base), step=0)
 
-    log_every = max(1, eval_every // 5)
+    log_every = resolve_log_every(cfg, eval_every)
 
     def _on_log(step, loss):
         log.info("step %5d/%d: train_loss=%.4f", step, steps, loss)

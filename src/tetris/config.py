@@ -28,6 +28,9 @@ class RunCfg:
     # unchanged). Diverse streaming pretraining (G4) needs it: a single high-loss
     # batch otherwise explodes the weights (no clip → NaN). Set >0 in the config.
     grad_clip: float = 0.0
+    # Train-metric log cadence in steps (G1). 0 = auto → ``min(eval_every//5, 50)``,
+    # so heartbeat logging no longer rides on the (coarse) eval cadence. Set >0 to pin.
+    log_every: int = 0
 
 
 @dataclass

@@ -58,15 +58,29 @@ def train_step(
     aux_weights: Sequence[float],
     loss_space: str = "arcsinh",
     max_grad_norm: float = 0.0,
+    collect_diag: bool = False,
 ) -> LossBreakdown:
     """Run one optimization step; returns the loss breakdown (D6). The block mask is
-    built eagerly here and passed in (hoisted out of the compiled forward)."""
+    built eagerly here and passed in (hoisted out of the compiled forward).
+
+    ``collect_diag`` (G1): also attach the **pre-clip** global grad norm and a dict
+    of horizon diagnostics (z-space + real-space + composition) to the breakdown —
+    off by default so non-logging callers pay nothing."""
     out = forward(batch, variate_basis=basis, block_mask=make_block_mask(batch))
     lb = compute_loss(out, batch, aux_weights=aux_weights, loss_space=loss_space)
     optimizer.zero_grad(set_to_none=True)
     lb.total.backward()
+    params = [p for grp in optimizer.param_groups for p in grp["params"]]
     if max_grad_norm and max_grad_norm > 0:
-        torch.nn.utils.clip_grad_norm_(
-            [p for grp in optimizer.param_groups for p in grp["params"]], max_grad_norm)
+        gnorm = torch.nn.utils.clip_grad_norm_(params, max_grad_norm)  # returns pre-clip norm
+    elif collect_diag:
+        from .diagnostics import grad_global_norm
+        gnorm = grad_global_norm(params)
+    else:
+        gnorm = None
     optimizer.step()
+    if collect_diag:
+        from .diagnostics import horizon_diagnostics
+        lb.grad_norm = gnorm.detach() if gnorm is not None else None
+        lb.diag = horizon_diagnostics(out, batch)
     return lb

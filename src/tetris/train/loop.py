@@ -12,16 +12,47 @@ checkpoint re-shard are S13.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import List, Optional, Tuple
 
 import torch
 
 from ..config import Config
+from ..losses import LossBreakdown
 from ..model.tetris import Tetris
 from ..packing.reservoir import StreamingReservoir, packed_batches
 from .step import make_basis, mark_dynamic_batch, train_step
-from .tracking import NullTracker, Tracker, eval_scalars
+from .tracking import (
+    NullTracker, Tracker, eval_scalars, eval_tail_scalars, per_config_rows,
+)
+
+
+def _step_scalars(lb: LossBreakdown, ema: float, lr: float, rate: float) -> dict:
+    """Flatten one step's loss breakdown + telemetry into scalars (G1).
+
+    Core training scalars (train_loss/ema/lr/throughput + loss components) are kept
+    **unconditionally** — a divergence must surface as an ``inf`` spike, not a
+    silently dropped point. The optional grad-norm + horizon ``diag`` extras are
+    finite-filtered so a stray NaN diagnostic never poisons a tracker panel."""
+    core = {
+        "train_loss": float(lb.total.detach()),
+        "train_loss_ema": float(ema),
+        "lr": lr,
+        "steps_per_sec": rate,
+        "loss/horizon": float(lb.horizon.detach()),
+        "loss/aux_total": float(lb.aux_total.detach()),
+    }
+    for k, a in enumerate(lb.aux_per_tier):
+        core[f"loss/aux_tier_{k}"] = float(a.detach())
+    extras: dict = {}
+    if lb.grad_norm is not None:
+        extras["grad_norm"] = float(lb.grad_norm)
+    if lb.diag:
+        extras.update(lb.diag)
+    core.update((k, v) for k, v in extras.items()
+                if isinstance(v, (int, float)) and math.isfinite(v))
+    return core
 
 
 def run_training(
@@ -78,6 +109,10 @@ def run_training(
     )
 
     losses: List[float] = []
+    # Geometric (log-space) EMA — early arcsinh-space losses span many orders of
+    # magnitude (random-init real-space error can be ~1e8); a linear EMA gets
+    # permanently poisoned by that transient, a log-space one rides through it.
+    ema_log: Optional[float] = None
     t0 = time.perf_counter()
     for batch in batches:
         if len(losses) >= steps:
@@ -85,21 +120,25 @@ def run_training(
         batch = batch.to(device)
         basis = make_basis(batch, cfg.model.d_model, device=device, generator=generator)
         mark_dynamic_batch(batch, basis)
+        step = len(losses) + 1
+        want_diag = log_every > 0 and step % log_every == 0   # only pay diag cost on log steps
         lb = train_step(
             forward, batch, basis, optimizer,
             aux_weights=cfg.loss.aux_weights, loss_space=cfg.norm.loss_space,
-            max_grad_norm=cfg.run.grad_clip,
+            max_grad_norm=cfg.run.grad_clip, collect_diag=want_diag,
         )
         losses.append(float(lb.total.detach()))
+        if math.isfinite(losses[-1]):    # never let an inf/nan poison the EMA
+            ll = math.log1p(max(losses[-1], 0.0))
+            ema_log = ll if ema_log is None else 0.98 * ema_log + 0.02 * ll
 
-        step = len(losses)
         # Live train-loss heartbeat (fires between evals so long runs log progress).
         if log_every > 0 and step % log_every == 0:
             if on_log is not None:
                 on_log(step, losses[-1])
             rate = step / max(1e-9, time.perf_counter() - t0)
-            tracker.log_scalars(
-                {"train_loss": losses[-1], "lr": lr, "steps_per_sec": rate}, step=step)
+            ema = math.expm1(ema_log) if ema_log is not None else losses[-1]
+            tracker.log_scalars(_step_scalars(lb, ema, lr, rate), step=step)
         if eval_loader is not None and eval_every > 0 and step % eval_every == 0:
             fn = eval_fn
             if fn is None:
@@ -112,4 +151,9 @@ def run_training(
             if on_eval is not None:           # live eval logging (not deferred to end)
                 on_eval(step, tl, losses[-1])
             tracker.log_scalars(eval_scalars(tl), step=step)
+            tail = eval_tail_scalars(tl)      # tail/blowup summary (leaderboard evals)
+            if tail:
+                tracker.log_scalars(tail, step=step)
+                cols, rows = per_config_rows(tl)
+                tracker.log_table("eval/per_config", cols, rows, step=step)
     return losses

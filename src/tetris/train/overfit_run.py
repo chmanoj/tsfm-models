@@ -39,9 +39,9 @@ from .loop import run_training
 from .sanity_plot import plot_eval_samples
 from .sanity_run import (
     _count_params, _device_info, _fmt_duration, _make_run_dir, resolve_device,
-    setup_logging,
+    resolve_log_every, setup_logging,
 )
-from .tracking import eval_scalars, make_tracker
+from .tracking import eval_scalars, eval_tail_scalars, make_tracker, per_config_rows
 
 log = logging.getLogger("tetris.overfit")
 
@@ -123,7 +123,7 @@ def run_overfit(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
     log.info("step %5d (random init): %s", 0, _fmt(base))
     tracker.log_scalars(eval_scalars(base), step=0)
 
-    log_every = max(1, eval_every // 5)
+    log_every = resolve_log_every(cfg, eval_every)
 
     def _on_log(step, loss):
         log.info("step %5d/%d: train_loss=%.4f", step, steps, loss)
@@ -148,6 +148,9 @@ def run_overfit(cfg_path: str, *, steps: int = 0, lr: float = 1e-3,
              "BEATS" if final["skill"] < 1 else "does NOT beat")
     _log_per_config(final)
     tracker.log_scalars(eval_scalars(final), step=steps)
+    tracker.log_scalars(eval_tail_scalars(final), step=steps)   # tail/blowup summary
+    cols, rows = per_config_rows(final)                          # sortable per-config panel
+    tracker.log_table("eval/per_config", cols, rows, step=steps)
 
     # Final checkpoint (entrypoint-level; D13 per-rank reservoir state is single-rank
     # here so a plain model state_dict suffices — distributed.save_checkpoint is G5).
