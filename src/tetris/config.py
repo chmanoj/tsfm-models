@@ -31,6 +31,12 @@ class RunCfg:
     # Train-metric log cadence in steps (G1). 0 = auto → ``min(eval_every//5, 50)``,
     # so heartbeat logging no longer rides on the (coarse) eval cadence. Set >0 to pin.
     log_every: int = 0
+    # Optimizer/schedule (Tier-1 training hygiene). Defaults reproduce the old plain
+    # Adam + constant-LR behavior exactly (wd=0, no warmup, constant), so existing
+    # runs/tests are unchanged; configs opt in.
+    weight_decay: float = 0.0           # AdamW decoupled weight decay (0 ⇒ ≡ Adam)
+    warmup_steps: int = 0               # linear LR warmup steps (0 ⇒ none)
+    lr_schedule: str = "constant"       # constant | cosine (cosine decays peak→0 after warmup)
 
 
 @dataclass

@@ -1,0 +1,79 @@
+# Tier-1 training-hygiene variant of gifteval_fixed_mix (same data/model/packing).
+# Changes vs the baseline 10k run (gifteval_fixed_mix_20260621-105506, skill 1.39),
+# isolating optimization only — data side held fixed for a clean A/B:
+#   - AdamW weight_decay 0.01 (was plain Adam, wd 0)
+#   - LR warmup 500 steps + cosine decay peak→0 (was constant 1e-3)
+#   - grad_clip 5.0 (was 1.0 — logged grad_norm sat at 9–48, i.e. clipping every step)
+# Motivation: telemetry showed a violent early transient + fine-tier instability
+# (z_absmax 152, aux_tier spike ~1900 @250) and a non-monotonic eval — classic
+# no-warmup / too-hot-late / over-clipped signatures. See docs/tetris/wandb_telemetry.md.
+#
+# Run (box):
+#   cd ~/tsfm-models && set -a && source .env && set +a && ~/.local/bin/uv run --no-sync \
+#     python -m tetris.train.overfit_run configs/gifteval_fixed_mix_tier1.yaml \
+#       --steps 10000 --eval-every 2500 --device cuda --n-plot 30
+
+run:
+  name: gifteval_fixed_mix_tier1
+  steps: 20000
+  seed: 0
+  grad_clip: 5.0          # safety net for true spikes, not a per-step governor
+  weight_decay: 0.01      # AdamW decoupled decay
+  warmup_steps: 500       # linear LR warmup (tames the random-init transient)
+  lr_schedule: cosine     # decay peak→0 over the run (settles the late bounce)
+
+backend:
+  device: auto
+  compile: true
+
+model:
+  d_model: 512
+  n_layers: 6
+  n_heads: 8
+  out_patch: 16
+
+data:
+  loader: curriculum
+  terms: [short, medium, long]
+  local_dir: ""
+  train_term: short
+  train_max_series_per_config: -1
+  shard_cycle: true
+
+curriculum:
+  total_items: 200000
+  phase2_start: 1.0
+  alpha: 0.4
+  temperature: 1.5
+  phase2_crop_distribution: auto_from_test_configs
+  sources:
+    - name: mixed
+      loader: streaming
+      shard_root: outputs/corpus_mixed
+      multiplier_phase1: 1.0
+      multiplier_phase2: 1.0
+      n_series: 0
+    - name: archetype
+      loader: streaming
+      shard_root: outputs/corpus_archetype
+      multiplier_phase1: 1.0
+      multiplier_phase2: 1.0
+      n_series: 0
+
+packing:
+  L_pack: 1024
+  max_query_tokens: 128
+  buffers_per_step: 8
+  reservoir: true
+  reservoir_k: 1000
+  scheduler_window: 64
+
+eval:
+  enabled: true
+  loader: gifteval_test
+  items_per_config: 10
+
+tracking:
+  backend: wandb
+  project: tetris
+  mode: auto

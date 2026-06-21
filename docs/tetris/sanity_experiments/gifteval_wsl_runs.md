@@ -110,3 +110,17 @@ ssh "$WSL" 'cd ~/tsfm-models && set -a && source .env && set +a && \
 **Tuning note:** `curriculum.total_items` is the schedule-progress **denominator** (items *pulled*, not steps).
 If the 2k check shows phase 2 never engages (or engages too early), scale `total_items` so `phase2_start` (0.8)
 lands in the last ~20% of the run — inspect the per-source mix in the train log against step count.
+
+## G1 telemetry runs — gifteval_fixed_mix 30M (2026-06-21)
+
+Panel reference + playbooks: `docs/tetris/wandb_telemetry.md`.
+
+**Baseline 10k** (wandb `gifteval_fixed_mix_20260621-105506`): leaderboard **2.37, skill 1.39**
+(beat the pre-telemetry 3.22/1.88; within run/eval noise). Findings the new panels surfaced:
+- The "flat" loss was noisy/unsmoothed, not stuck — geometric `train_loss_ema` descends; eval 244→9.2→4.3→5.4→2.4 (non-monotonic, tail-driven).
+- **Model self-heals extrapolation**: `us_births` `fc_ctx_ratio` 3300→0.6, skill ~1 by 10k; `n_skill_gt10` 37→3.
+- **Residual loss is NOT extrapolation** — it's losing to a near-perfect seasonal-naive on high-SNR seasonal/near-constant configs (covid_deaths/electricity-W/jena, `fc_ctx_ratio`≈1, snaive MASE 0.004–0.16). `mase_max`≈2.3e9 is `bitbrains_fast_storage/H/long` (snaive also 1.5e9, skill 1.5 — hard data, not a model blowup).
+- **Early instability**: violent random-init transient (`z_absmax` 152, `real_mae`~1e17); fine-tier aux heads spike ~1900 @step 250 then recover; `grad_norm` 9–48 vs `grad_clip=1` (clipping every step). Not capacity-bound.
+
+**Tier-1 A/B** (`configs/gifteval_fixed_mix_tier1.yaml`): AdamW wd 0.01 + warmup 500 + cosine + grad_clip 5,
+data held fixed. Testing whether the instability/late-bounce shrink and the score improves vs baseline 1.39.

@@ -28,6 +28,26 @@ from .tracking import (
 )
 
 
+def _build_scheduler(optimizer, cfg, *, total_steps: int):
+    """LR schedule (Tier-1): linear warmup over ``run.warmup_steps`` then
+    ``run.lr_schedule`` ∈ {constant, cosine} (cosine decays peak→0 across the
+    remaining steps). Defaults (warmup=0, constant) ⇒ a no-op constant LR, so the
+    old behavior is exactly preserved. Returns a ``LambdaLR`` stepped per train step."""
+    warmup = max(0, int(getattr(cfg.run, "warmup_steps", 0)))
+    schedule = getattr(cfg.run, "lr_schedule", "constant")
+    total = max(1, int(total_steps))
+
+    def lr_factor(s: int) -> float:      # s = scheduler.step() count (0 on first call)
+        if warmup > 0 and s < warmup:
+            return (s + 1) / warmup
+        if schedule == "cosine":
+            prog = min(1.0, max(0.0, (s - warmup) / max(1, total - warmup)))
+            return 0.5 * (1.0 + math.cos(math.pi * prog))
+        return 1.0
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
+
+
 def _step_scalars(lb: LossBreakdown, ema: float, lr: float, rate: float) -> dict:
     """Flatten one step's loss breakdown + telemetry into scalars (G1).
 
@@ -97,7 +117,9 @@ def run_training(
         model = Tetris(cfg).to(device)
     if forward is None:
         forward = model
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=lr, weight_decay=getattr(cfg.run, "weight_decay", 0.0))
+    scheduler = _build_scheduler(optimizer, cfg, total_steps=steps)
     if reservoir is None:
         reservoir = StreamingReservoir.from_cfg(cfg, rank=rank, world_size=world_size)
 
@@ -127,6 +149,7 @@ def run_training(
             aux_weights=cfg.loss.aux_weights, loss_space=cfg.norm.loss_space,
             max_grad_norm=cfg.run.grad_clip, collect_diag=want_diag,
         )
+        scheduler.step()                 # advance LR (warmup → cosine/constant)
         losses.append(float(lb.total.detach()))
         if math.isfinite(losses[-1]):    # never let an inf/nan poison the EMA
             ll = math.log1p(max(losses[-1], 0.0))
@@ -138,7 +161,8 @@ def run_training(
                 on_log(step, losses[-1])
             rate = step / max(1e-9, time.perf_counter() - t0)
             ema = math.expm1(ema_log) if ema_log is not None else losses[-1]
-            tracker.log_scalars(_step_scalars(lb, ema, lr, rate), step=step)
+            cur_lr = optimizer.param_groups[0]["lr"]   # log the live scheduled LR
+            tracker.log_scalars(_step_scalars(lb, ema, cur_lr, rate), step=step)
         if eval_loader is not None and eval_every > 0 and step % eval_every == 0:
             fn = eval_fn
             if fn is None:
