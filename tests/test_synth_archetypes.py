@@ -182,6 +182,21 @@ def test_counts_spike_season_concentrates_events():
     assert bins.max() > 2.0 * (bins.mean() + 1e-9)           # a phase band dominates (vs ~1.0 uniform)
 
 
+def test_counts_spike_period_is_more_regular_than_poisson():
+    # quasi-periodic placement gives inter-spike intervals with LOW spread (a predictable
+    # cadence), unlike Poisson spikes whose gaps are exponential (coefficient of variation ~1).
+    def cov_of_gaps(spike_period):
+        x, _ = A.gen_counts(np.random.default_rng(2), 8000, 7, level=5.0, dispersion=0.0,
+                            level_drift=0.0, spike_rate=1.0 / 60.0, spike_amp=12.0,
+                            spike_period=spike_period)
+        idx = np.flatnonzero(x > x.mean() + 3 * x.std())     # event onsets (tall)
+        if idx.size < 5:
+            idx = np.flatnonzero(x > np.median(x) + 1e-6)
+        gaps = np.diff(idx[np.r_[True, np.diff(idx) > 5]])    # collapse a recession to one event
+        return float(np.std(gaps) / (np.mean(gaps) + 1e-9))
+    assert cov_of_gaps(50.0) < cov_of_gaps(0.0)              # regular cadence < Poisson spread
+
+
 def test_saugeenday_monthly_seasonal_naive_learnable():
     # the monthly river aggregate has a strong ANNUAL freshet cycle — seasonal-naive (12) must
     # clearly beat last-value, the way it does on the real saugeenday/M (snaive 0.73 < last).

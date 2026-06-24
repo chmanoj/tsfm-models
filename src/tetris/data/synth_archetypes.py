@@ -218,8 +218,9 @@ def _smooth_resid(rng, n: int, corr: float = 4.0) -> np.ndarray:
 
 def gen_drift_seasonal(
     rng, n: int, spc: int, *, drift_corr_days: float = 8.0, weekly_amp: float = 0.0,
-    daily_amp: float = 0.0, daily_amp_jitter: float = 0.45, noise_amp: float = 0.12,
-    hf_noise: float = 0.0, trend: float = 0.0,
+    daily_amp: float = 0.0, daily_amp_jitter: float = 0.45, harmonic_amp: float = 0.0,
+    harmonic_k: float = 2.0, noise_amp: float = 0.12, hf_noise: float = 0.0,
+    trend: float = 0.0,
 ) -> Tuple[np.ndarray, int]:
     """The **multi-scale weather/drift** archetype (jena): a slow long-correlation drift
     backbone (the seasonal swing, which over a short forecast context reads as persistent
@@ -245,7 +246,13 @@ def gen_drift_seasonal(
         phase = 2 * np.pi * np.arange(n) / spc + rng.uniform(0, 2 * np.pi)
         n_days = int(np.ceil(n / spc))
         damp = _persistent_amp(rng, n_days, jitter=daily_amp_jitter, persist=0.7)
-        out = out + daily_amp * np.repeat(damp, spc)[:n] * np.sin(phase)
+        cycle = np.sin(phase)
+        if harmonic_amp > 0:
+            # a SECOND sine component at k× the base frequency (a harmonic), so the cycle is
+            # not a clean single sine — real seasonal cycles (e.g. us_births) carry a second
+            # harmonic that shapes the peak/trough (a shoulder or a secondary bump).
+            cycle = cycle + harmonic_amp * np.sin(harmonic_k * phase + rng.uniform(0, 2 * np.pi))
+        out = out + daily_amp * np.repeat(damp, spc)[:n] * cycle
     out = S._standardize(out)
     if trend:                                            # persistent linear drift of the level
         # added AFTER standardize so it isn't normalized away — a trend + the (mean-reverting)
@@ -265,6 +272,7 @@ def gen_counts(
     level_drift: float = 0.4, level_corr_days: float = 10.0, season_amp: float = 0.0,
     trend: float = 0.0, intermittent: float = 0.0, spike_rate: float = 0.0,
     spike_amp: float = 10.0, spike_decay: float = 0.0, spike_season_spc: float = 0.0,
+    spike_period: float = 0.0, spike_period_jitter: float = 0.35,
     shift_amp: float = 0.0, shift_corr_days: float = 1.5,
 ) -> Tuple[np.ndarray, int]:
     """A non-negative **count / intermittent-demand** archetype — the retail/health family
@@ -277,10 +285,12 @@ def gen_counts(
     **intermittency** (zero-inflation — most steps zero, rare small demands, as in
     car_parts) and optional **sparse large spikes** on a low baseline (hierarchical_sales),
     which can be given an **asymmetric exponential recession** (``spike_decay`` — a fast rise
-    then a slow decay tail, the river-flow *hydrograph* shape: saugeenday flood events) and a
+    then a slow decay tail, the river-flow *hydrograph* shape: saugeenday flood events), a
     **seasonal envelope** (``spike_season_spc`` — an annual period in samples over which the
-    spike *probability and amplitude* concentrate, so floods recur with an annual rhythm and a
-    slow amplitude wave rather than uniformly at random: the recurring spring-freshet pattern).
+    spike *amplitude* waves, so floods are bigger in the high season: the spring-freshet
+    pattern), and **quasi-periodic placement** (``spike_period`` — a roughly regular interval
+    between events with ``spike_period_jitter`` randomness, so the inter-spike spacing is
+    *predictable* rather than Poisson-random).
 
     Learnable the way the real count data is: the *level* persists so last-value / linear
     forecast it (and any seasonal modulation repeats → seasonal-naive), while the count
@@ -320,17 +330,26 @@ def gen_counts(
     counts = rng.poisson(lam).astype(np.float64)
     if intermittent > 0:                                  # zero-inflation (intermittent demand)
         counts = counts * (rng.random(n) >= float(np.clip(intermittent, 0.0, 0.99)))
-    if spike_rate > 0:                                    # sparse large spikes on a low base
+    if spike_rate > 0 or spike_period > 0:               # sparse large spikes on a low base
         if spike_season_spc and spike_season_spc > 1:
-            # an annual envelope: floods recur with a seasonal RHYTHM (cluster near the high
-            # season, e.g. spring snowmelt) with a slow amplitude wave — not uniform random.
+            # an annual amplitude envelope: floods are bigger in the high season (spring melt)
+            # — a slow amplitude wave over the events.
             ph = 2 * np.pi * np.arange(n) / float(spike_season_spc) + rng.uniform(0, 2 * np.pi)
-            env = (0.5 + 0.5 * np.sin(ph)) ** 2           # 0..1, concentrated near the peak
-            prob = spike_rate * (0.25 + 1.5 * env)        # higher probability in season
-            amp_env = 0.4 + 1.3 * env                     # and larger events in season
+            env = (0.5 + 0.5 * np.sin(ph)) ** 2           # 0..1, peaked near the high season
+            amp_env = 0.4 + 1.3 * env
         else:
-            prob = np.full(n, float(spike_rate)); amp_env = np.ones(n)
-        mask = rng.random(n) < prob
+            env = None; amp_env = np.ones(n)
+        if spike_period and spike_period > 1:
+            # quasi-periodic events: a roughly REGULAR interval (predictable spacing) with
+            # fractional jitter — not Poisson-random gaps.
+            mask = np.zeros(n, dtype=bool)
+            t = rng.uniform(0, spike_period)
+            while t < n:
+                mask[int(t)] = True
+                t += spike_period * (1.0 + spike_period_jitter * rng.uniform(-1.0, 1.0))
+        else:
+            prob = spike_rate * (0.25 + 1.5 * env) if env is not None else np.full(n, float(spike_rate))
+            mask = rng.random(n) < prob
         spikes = mask * spike_amp * max(1e-3, level) * rng.uniform(0.5, 1.5, n) * amp_env
         if spike_decay > 0:
             # river hydrograph: each event RISES sharply then RECESSES (slow exponential

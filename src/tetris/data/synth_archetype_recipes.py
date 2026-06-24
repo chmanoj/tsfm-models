@@ -251,15 +251,17 @@ RECIPES: Dict[str, dict] = {
     # NEW `spike_decay` recession. D and W differ only in the recession length in SAMPLES (the
     # event lasts ~3 weeks ⇒ ~18 samples at D, ~3 at W) ⇒ two recipes. Real last < lin (mean-
     # reverting to baseline): a flood spike landing in the horizon is unpredictable (hard).
-    # the floods recur with an ANNUAL rhythm (spike_season_spc — 365 @D / 52 @W) and a slow
-    # amplitude wave (bigger spring freshets), not uniformly at random (maintainer); each event
-    # keeps the asymmetric hydrograph recession.
+    # the floods recur at a roughly REGULAR interval (spike_period — predictable spacing, not
+    # Poisson-random) with an ANNUAL amplitude wave (spike_season_spc — bigger spring freshets)
+    # and each event keeps the asymmetric hydrograph recession (spike_decay). (maintainer)
     "saugeenday_daily": {"period_min": 1440, "tie": 0.0, "channels": [
         ("counts", dict(level=40.0, dispersion=0.12, level_drift=0.5, level_corr_days=2.0,
-                        spike_rate=0.012, spike_amp=7.0, spike_decay=15.0, spike_season_spc=365.0))]},
+                        spike_amp=7.0, spike_decay=15.0, spike_season_spc=365.0,
+                        spike_period=45.0, spike_period_jitter=0.35))]},
     "saugeenday_weekly": {"period_min": 1440, "tie": 0.0, "channels": [
         ("counts", dict(level=40.0, dispersion=0.12, level_drift=0.5, level_corr_days=4.0,
-                        spike_rate=0.035, spike_amp=7.0, spike_decay=3.0, spike_season_spc=52.0))]},
+                        spike_amp=7.0, spike_decay=3.0, spike_season_spc=52.0,
+                        spike_period=6.0, spike_period_jitter=0.35))]},
     # saugeenday_monthly — the monthly aggregate reveals a strong ANNUAL freshet cycle (real
     # snaive 0.31 ≪ last 0.86): a sharp spring peak repeating yearly on a low baseline. A
     # `recurring` single_hump at the annual period (spc 12 @M) is the repeating peak (seasonal-
@@ -287,9 +289,13 @@ RECIPES: Dict[str, dict] = {
     # us_births M — a rounded ANNUAL cycle + multi-year drift (drift_seasonal annual `daily_amp`
     # sine). Real M is strongly seasonal (snaive 0.30 ≪ last) but NOT a clean sine — it carries
     # real month-to-month noise (maintainer: "we need noise"), so a sizeable residual on top.
+    # ...with a SECOND harmonic (harmonic_amp at 2× the annual frequency) so the cycle is not a
+    # clean single sine — real us_births/M carries a second seasonal component (a shoulder /
+    # secondary bump) on the annual wave (maintainer).
     "us_births_monthly": {"period_min": 525600, "tie": 0.0, "channels": [
-        ("drift_seasonal", dict(daily_amp=1.6, daily_amp_jitter=0.15, weekly_amp=0.0,
-                                drift_corr_days=4.0, noise_amp=0.18, hf_noise=0.09))]},
+        ("drift_seasonal", dict(daily_amp=1.6, daily_amp_jitter=0.15, harmonic_amp=0.5,
+                                harmonic_k=2.0, weekly_amp=0.0, drift_corr_days=4.0,
+                                noise_amp=0.18, hf_noise=0.09))]},
 }
 
 

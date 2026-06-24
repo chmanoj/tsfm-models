@@ -195,6 +195,11 @@ committed **characterizer** is a next step).
     saugeenday_weekly, saugeenday_monthly, us_births_daily, us_births_weekly, us_births_monthly
     (+ tests: spike_decay recession asymmetry, saugeenday_monthly seasonal-naive). **This completes the
     per-dataset hand-characterization of all GIFT-Eval configs.**
+  - **Further feedback rounds (maintainer):** the saugeenday seasonal envelope ⇒ `spike_season_spc`
+    (annual amplitude wave); then spike *spacing* still too random ⇒ `gen_counts` **`spike_period`**
+    (quasi-periodic placement — a roughly regular, predictable cadence with jitter, not Poisson gaps);
+    and us_births/M still too clean ⇒ `gen_drift_seasonal` **`harmonic_amp`** (a SECOND sine at 2× the
+    annual frequency — real births carries a second seasonal component shaping the peak). Tests for both.
 
 #### Status (end of 2026-06-24 session)
 - **DONE:** solar, bizitobs, electricity, covid, jena (prior) + **traffic** (LOOP_SEATTLE /
@@ -214,8 +219,9 @@ committed **characterizer** is a next step).
   peak-height variation). **NEW `gen_counts`** (overdispersed non-negative integer counts;
   knobs `dispersion`, `intermittent`, `shift_amp` additive held-plateau level shifts,
   `spike_rate`/`spike_amp`, **`season_amp`** weak repeating modulation, **`spike_decay`** asymmetric
-  exponential recession = the river hydrograph, **`spike_season_spc`** annual envelope concentrating
-  spike timing+amplitude = recurring freshets) — the counts/intermittent/retail family (and reused for
+  exponential recession = the river hydrograph, **`spike_season_spc`** annual amplitude wave on the
+  spikes, **`spike_period`** quasi-periodic spike placement = a regular flood cadence) — the
+  counts/intermittent/retail family (and reused for
   non-negative bursty/impulsive data: kdd pollution, bitbrains storage, saugeenday flood).
   Recipes: solar, bizitobs, electricity, covid, jena, ett, traffic_flow, traffic_speed, taxi_demand,
   m4_hourly, m4_trend, m4_annual, m4_spiky, restaurant, hospital, car_parts, hierarchical_sales,
