@@ -117,6 +117,40 @@ def test_multivariate_shape_and_shared_envelope():
     assert offcorr(tied) > offcorr(indep) + 0.1
 
 
+def test_counts_are_nonneg_integer_overdispersed_and_learnable():
+    # the count archetype is non-negative integer-valued with overdispersion (var > mean,
+    # the negative-binomial texture), and the persistent level is learnable: last-value /
+    # linear forecast the wandering level better than a no-information baseline.
+    x, season = A.gen_counts(np.random.default_rng(0), 3000, 7, level=20.0, dispersion=0.5,
+                             level_drift=0.3)
+    assert season == 7 and np.isfinite(x).all()
+    assert (x >= 0).all() and np.allclose(x, np.round(x))         # non-negative integers
+    assert x.var() > x.mean()                                     # overdispersed (NB, not Poisson)
+    last, _, lin = _baselines(x, 12)
+    assert min(last, lin) < 3.0                                   # the level is forecastable
+
+
+def test_counts_intermittent_is_mostly_zero_with_demands():
+    # intermittent demand (car_parts): a large majority of exact zeros, with the rare
+    # nonzero demands — a genuinely sparse count process no smooth generator gives.
+    x, _ = A.gen_counts(np.random.default_rng(1), 4000, 12, level=0.45, dispersion=0.6,
+                        intermittent=0.5)
+    assert (x == 0).mean() > 0.6 and x.max() >= 1            # mostly zero, real demands occur
+
+
+def test_counts_level_shift_holds_plateaus():
+    # held-plateau level shifts (hospital): the intensity steps to sustained regimes, so a
+    # long run at a distinctly different local mean appears (not fast mean-reversion).
+    def has_low_basin(x):
+        w = 40
+        local = np.convolve(x, np.ones(w) / w, mode="valid")
+        return local.min() < 0.6 * x.mean()
+    xs = [A.gen_counts(np.random.default_rng(k), 1200, 12, level=13.0, dispersion=0.1,
+                       level_drift=0.1, shift_amp=0.45, shift_corr_days=3.0)[0]
+          for k in range(6)]
+    assert any(has_low_basin(x) for x in xs)
+
+
 def test_samples_per_cycle_decoupling():
     # a 1-day cycle is 144 samples at 10-min and 24 at hourly (period x sampling freq).
     assert A.samples_per_cycle(1440, 10) == 144

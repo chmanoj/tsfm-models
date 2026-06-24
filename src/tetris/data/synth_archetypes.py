@@ -260,6 +260,66 @@ def gen_drift_seasonal(
     return out.astype(np.float64), 7 * spc
 
 
+def gen_counts(
+    rng, n: int, spc: int, *, level: float = 20.0, dispersion: float = 1.0,
+    level_drift: float = 0.4, level_corr_days: float = 10.0, season_amp: float = 0.0,
+    trend: float = 0.0, intermittent: float = 0.0, spike_rate: float = 0.0,
+    spike_amp: float = 10.0, shift_amp: float = 0.0, shift_corr_days: float = 1.5,
+) -> Tuple[np.ndarray, int]:
+    """A non-negative **count / intermittent-demand** archetype — the retail/health family
+    (restaurant, hospital, car_parts, hierarchical_sales) that no smooth-backbone generator
+    reproduces. A slowly-varying positive **intensity** ``λ_t`` (a persistent multi-day
+    level wander around ``level``, with optional **sustained held-plateau level shifts**
+    (``shift_amp`` — hospital's drop-then-recover regimes), weak repeating ``season_amp``
+    modulation and a slow ``trend``) drives **overdispersed integer counts** (negative-binomial via
+    Gamma–Poisson mixing: variance > mean, ``dispersion`` = 1/r), with optional
+    **intermittency** (zero-inflation — most steps zero, rare small demands, as in
+    car_parts) and optional **sparse large spikes** on a low baseline (hierarchical_sales).
+
+    Learnable the way the real count data is: the *level* persists so last-value / linear
+    forecast it (and any seasonal modulation repeats → seasonal-naive), while the count
+    noise itself is the irreducible residual — it is the *dominant* visible feature here,
+    not a small additive jitter on a smooth backbone. Returns ``(counts[n], season=spc)``.
+    Non-negative and integer-valued (a flat zero floor that survives later z-scoring)."""
+    spc = int(max(2, spc))
+    # slow, persistent log-intensity: a multi-day smooth drift around log(level), so the
+    # count rate wanders over weeks but is nearly flat over a short horizon (last-value /
+    # linear forecast the level), never a runaway random walk.
+    drift = S._standardize(_smooth_resid(rng, n, corr=max(2.0, level_corr_days * spc)))
+    log_lam = np.log(max(1e-3, level)) + level_drift * drift
+    if trend:
+        log_lam = log_lam + trend * np.linspace(0, 1, n)
+    if season_amp > 0:                                    # weak repeating seasonal modulation
+        phase = 2 * np.pi * np.arange(n) / spc + rng.uniform(0, 2 * np.pi)
+        log_lam = log_lam + season_amp * np.sin(phase)
+    lam = np.exp(np.clip(log_lam, -8.0, 12.0))
+    if shift_amp > 0:                                     # sustained held-plateau level regimes
+        # hospital: a high regime, a multi-month drop, a recovery — held for a stretch then
+        # stepped (abrupt transitions, not a smooth wander). ADDITIVE in count space (not in
+        # log space) so high and low regimes are *symmetric* — a multiplicative log-space
+        # shift blows the high side up into upward outliers. Clipped non-negative.
+        switch_p = 1.0 / max(2.0, shift_corr_days * spc)
+        plateau = np.empty(n)
+        val = float(np.clip(rng.normal(0, 1), -1.8, 1.8))
+        for i in range(n):
+            if i > 0 and rng.random() < switch_p:
+                val = float(np.clip(rng.normal(0, 1), -1.8, 1.8))
+            plateau[i] = val
+        lam = np.clip(lam + shift_amp * max(1e-3, level) * plateau, 0.0, None)
+    # overdispersed counts (negative binomial = Gamma-mixed Poisson): variance = λ + λ²·disp.
+    # dispersion=0 ⇒ plain Poisson. This is what gives the discrete, count-like texture.
+    if dispersion > 1e-6:
+        r = 1.0 / dispersion
+        lam = rng.gamma(shape=r, scale=lam / r)
+    counts = rng.poisson(lam).astype(np.float64)
+    if intermittent > 0:                                  # zero-inflation (intermittent demand)
+        counts = counts * (rng.random(n) >= float(np.clip(intermittent, 0.0, 0.99)))
+    if spike_rate > 0:                                    # sparse large spikes on a low base
+        mask = rng.random(n) < spike_rate
+        counts = counts + mask * spike_amp * max(1e-3, level) * rng.uniform(0.5, 1.5, n)
+    return counts.astype(np.float64), spc
+
+
 def gen_growth(rng, n: int, *, kind: Optional[str] = None, noise_amp: float = 0.04
                ) -> Tuple[np.ndarray, str]:
     """Clean **trend/growth** (covid): linear / logistic / exponential + small residual.
@@ -289,6 +349,8 @@ def gen_channel(rng, n: int, spc: int, archetype: str, params: dict) -> np.ndarr
         return gen_drift_seasonal(rng, n, spc, **p)[0]
     if archetype == "growth":
         return gen_growth(rng, n, **p)[0]
+    if archetype == "counts":
+        return gen_counts(rng, n, spc, **p)[0]
     if archetype == "spikes":
         base = gen_drift_seasonal(rng, n, spc, weekly_amp=p.get("weekly_amp", 0.0),
                                   noise_amp=p.get("noise_amp", 0.05))[0]

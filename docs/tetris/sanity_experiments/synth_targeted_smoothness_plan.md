@@ -105,20 +105,47 @@ committed **characterizer** is a next step).
   clean sine). Panels: `docs/tetris/sanity_experiments/synth_panels/h1_1_m4/`. Note: M4's
   within-config diversity is best served by the *variety sampler* mixing these archetypes,
   not one fixed recipe per config.
+- **Counts/retail batch (2026-06-24) — DONE.** Characterized restaurant / car_parts_with_missing
+  / hospital / hierarchical_sales (D+W) — all univariate count series (cluster E). **NEW
+  archetype** `gen_counts`: overdispersed non-negative **integer** counts (negative-binomial
+  via Gamma–Poisson mixing) driven by a slowly-varying intensity, with **zero-inflation**
+  (`intermittent` — car_parts), **held-plateau level shifts** (`shift_amp`, ADDITIVE in count
+  space so high/low regimes are symmetric — hospital's drop-then-recover), and **sparse large
+  spikes** (`spike_rate`/`spike_amp` — hierarchical). None of the smooth-backbone generators
+  produce discrete/intermittent count data, so this is a genuinely new shape. Recipes:
+  `restaurant`, `hospital`, `car_parts`, `hierarchical_sales` (one recipe serves D+W).
+  - **The gate here is PREDICTABILITY PARITY, not "make it learnable"** (maintainer caught
+    this mid-batch). These configs are mostly **un**predictable in the *real* data, so faithful
+    synth is noise/spike-dominated — forcing learnable structure would be wrong. Verified the
+    synth-vs-real learnability split (snaive/last/lin MASE): restaurant true parity (both
+    last≈1.0); hierarchical real is *very* hard (last-MASE 2.6–3.6: quiet baseline + rare GIANT
+    spikes wreck any forecast) — first pass was far too easy (0.6), fixed by quieting the
+    baseline + making spikes rarer & much taller → synth last-MASE ~1.0 (D) / ~1.3 (W), the
+    right hard regime (didn't chase the absolute 2.6 — that would ruin the quiet-baseline /
+    rare-giant-spike look). car_parts MASE is degenerate (near-all-zero ⇒ scale→0) so the
+    visual sparsity is the only honest gate.
+  - Subagent rounds: round-1 flagged hospital (no level shifts) + car_parts (too dense) →
+    added held plateaus + tuned intermittency; round-2 flagged hospital upward outliers (the
+    log-space shift was multiplicative/asymmetric) → switched to **additive** count-space
+    shift; maintainer flagged hierarchical predictability → the MASE-parity retune above.
+  Panels: `docs/tetris/sanity_experiments/synth_panels/h1_1_counts/`.
 
-#### Status (end of 2026-06-23 session)
+#### Status (end of 2026-06-24 session)
 - **DONE:** solar, bizitobs, electricity, covid, jena (prior) + **traffic** (LOOP_SEATTLE /
-  M_DENSE / SZ_TAXI), **ETT** (ett1/ett2), **M4** (all 6 freqs) (this session).
-- **REMAINING (next session, in order):** counts/retail (restaurant / car_parts_with_missing
-  / hospital / hierarchical_sales) → river/births (saugeenday / us_births) → remainder
+  M_DENSE / SZ_TAXI), **ETT** (ett1/ett2), **M4** (all 6 freqs) (prior session) + **counts/retail**
+  (restaurant / car_parts / hospital / hierarchical_sales D+W) (this session).
+- **REMAINING (next session, in order):** river/births (saugeenday / us_births) → remainder
   (kdd_cup_2018 / temperature_rain / solar-D/W / electricity-D/W / bitbrains_fast_storage).
 - **Current archetype vocabulary** — `PROFILE_KINDS`: `pulse`, `business`, `double_hump`,
   `single_hump`, **`valley`** (high plateau notched down by dips — traffic speed), **`broad_hump`**
   (wide rounded soft trapezoid — traffic/taxi flow). `gen_recurring_profile` knobs incl.
   **`regime_quiet`** (active↔quiet contrast depth). `gen_drift_seasonal` knobs incl. **`hf_noise`**
   (white HF jitter), **`trend`** (persistent linear drift), **`daily_amp_jitter`** (per-cycle
-  peak-height variation). Recipes: solar, bizitobs, electricity, covid, jena, ett, traffic_flow,
-  traffic_speed, taxi_demand, m4_hourly, m4_trend, m4_annual, m4_spiky.
+  peak-height variation). **NEW `gen_counts`** (overdispersed non-negative integer counts;
+  knobs `dispersion`, `intermittent`, `shift_amp` additive held-plateau level shifts,
+  `spike_rate`/`spike_amp`) — the counts/intermittent/retail family. Recipes: solar, bizitobs,
+  electricity, covid, jena, ett, traffic_flow, traffic_speed, taxi_demand, m4_hourly, m4_trend,
+  m4_annual, m4_spiky, restaurant, hospital, car_parts, hierarchical_sales.
 
 #### Committed tooling (`src/tetris/data/synth_explore.py`)
 The per-dataset workflow tools (replaces the throwaway scratchpad scripts). Reads real data

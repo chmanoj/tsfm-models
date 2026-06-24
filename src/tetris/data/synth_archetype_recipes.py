@@ -139,6 +139,36 @@ RECIPES: Dict[str, dict] = {
     # smooth-growth subtype → use m4_trend with a strong trend for that minority.)
     "m4_spiky": {"period_min": 525600, "tie": 0.0, "channels": [
         ("spikes", dict(rate_per_day=0.6, amp=4.0, weekly_amp=0.0, noise_amp=0.1))]},
+    # --- counts / retail (univariate; overdispersed non-negative integer counts) ----------
+    # restaurant: noisy DAILY visit counts (≈0–60 around a mean ~20), no clean seasonality —
+    # a slowly-wandering level with heavy overdispersed count noise on top (last-value ≈
+    # linear on the real; the noise is the dominant, irreducible feature). period=weekly so
+    # the level-wander correlation is a few weeks at daily sampling.
+    "restaurant": {"period_min": 10080, "tie": 0.0, "channels": [
+        ("counts", dict(level=20.0, dispersion=0.4, level_drift=0.3, level_corr_days=8.0))]},
+    # hospital: MONTHLY admission counts (≈0–27), weak yearly season + slow level shifts
+    # (a drop-then-recover over the 6-year history). linear/last edge seasonal-naive on the
+    # real → a wandering level (higher drift, shorter correlation so it shifts within the
+    # record) dominates a small repeating yearly modulation. spc=12 at monthly sampling.
+    "hospital": {"period_min": 525600, "tie": 0.0, "channels": [
+        ("counts", dict(level=13.0, dispersion=0.16, level_drift=0.1, level_corr_days=2.2,
+                        shift_amp=0.6, shift_corr_days=2.2, season_amp=0.08))]},
+    # car_parts_with_missing: INTERMITTENT demand — mostly exact zeros with rare small
+    # integer demands (1–2). A very low intensity + strong zero-inflation; no smooth
+    # generator produces this discrete sparse-count texture. spc=12 (monthly/yearly).
+    "car_parts": {"period_min": 525600, "tie": 0.0, "channels": [
+        ("counts", dict(level=0.45, dispersion=0.6, level_drift=0.4, level_corr_days=2.0,
+                        intermittent=0.5))]},
+    # hierarchical_sales (D and W): a QUIET low count baseline punctuated by RARE, GIANT
+    # spikes (baseline ~few, spikes 20–30×), aperiodic (season reported as 1) →
+    # sparse-random spikes, not a recurring profile. The defining property is **low
+    # predictability**: the real last-/linear-MASE is 2.6–3.6 because a rare giant spike
+    # landing in the horizon wrecks any forecast — so the synth must be hard too (quiet
+    # baseline so spikes dominate the scale, spikes rare + tall, *not* a busy easy baseline).
+    # One recipe serves D (interval 1440 ⇒ spc 7) and W (interval 10080 ⇒ spc ~1→clamped).
+    "hierarchical_sales": {"period_min": 10080, "tie": 0.0, "channels": [
+        ("counts", dict(level=4.0, dispersion=0.4, level_drift=0.2, level_corr_days=6.0,
+                        spike_rate=0.018, spike_amp=28.0))]},
 }
 
 
