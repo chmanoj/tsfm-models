@@ -64,12 +64,16 @@ RECIPES: Dict[str, dict] = {
     "traffic_flow": {"period_min": 1440, "tie": 0.0, "channels": [
         ("recurring", dict(kind="broad_hump", weekly=True, amp_jitter=0.18, amp_persist=0.6,
                            noise_amp=0.06, hf_noise=0.09))]},
-    # taxi DEMAND (SZ_TAXI): a WEAK daily cycle drowned in heavy noise + occasional level
-    # shifts — snaive only just beats last on the real (not a clean hump). Modeled as a
-    # small daily oscillation on a persistent drift with a large residual.
+    # taxi DEMAND (SZ_TAXI): TWO regimes — a cyclic stretch (strong daily wave, high day +
+    # sharp pre-dawn troughs) then a flat noise-dominated stretch — with heavy noise
+    # throughout. The `regime` envelope scales the daily profile down to a quiet level
+    # while the residual stays constant, so a quiet stretch reads as "flat + noise" and an
+    # active stretch as "cycle + noise" — the real two-regime structure. snaive only just
+    # beats last (the cycle is weak relative to the noise), as on the real.
     "taxi_demand": {"period_min": 1440, "tie": 0.0, "channels": [
-        ("drift_seasonal", dict(weekly_amp=0.0, daily_amp=0.6, drift_corr_days=4.0,
-                                noise_amp=0.7))]},
+        ("recurring", dict(kind="broad_hump", weekly=False, amp_jitter=0.25, amp_persist=0.85,
+                           noise_amp=0.12, hf_noise=0.15, regime_prob=0.05,
+                           regime_quiet=(0.04, 0.15)))]},
     # traffic SPEED (LOOP_SEATTLE): high free-flow plateau notched DOWN by two rush-hour
     # dips/day (the `valley` profile) + heavy HF jitter (speed is noisy at 5T/H).
     "traffic_speed": {"period_min": 1440, "tie": 0.0, "channels": [

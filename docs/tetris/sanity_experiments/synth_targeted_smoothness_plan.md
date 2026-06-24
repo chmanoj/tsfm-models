@@ -60,8 +60,13 @@ committed **characterizer** is a next step).
   - **M_DENSE (flow)** → NEW `broad_hump` profile: a wide rounded daytime (~0.6 of the day,
     large taper) over a short low night — a soft trapezoid, *not* the square wave `business`
     gave nor the too-narrow `single_hump`. Recipe `traffic_flow`.
-  - **SZ_TAXI (demand)** → a noisy weak daily cycle (periodicity buried in noise), modeled
-    with `drift_seasonal` (small `daily_amp`, large `noise_amp`). Recipe `taxi_demand`.
+  - **SZ_TAXI (demand)** → **two regimes** (maintainer feedback): a cyclic stretch (rounded
+    daily wave + noise) then a flat noise-dominated stretch. Modeled as a regime-switching
+    `broad_hump` recurring profile — the `regime` envelope scales the daily profile down to
+    a deep quiet level (new `regime_quiet` pass-through knob) while the residual stays
+    constant, so a quiet stretch reads as *flat + noise* and an active stretch as *cycle +
+    noise*. Recipe `taxi_demand`. (First pass used `drift_seasonal` → looked like uniform
+    sine+noise with no regimes; the eye caught it.)
   Panels: `docs/tetris/sanity_experiments/synth_panels/h1_1_traffic/`. Subagent visual
   critique drove the `broad_hump` fix (M_DENSE square-wave) and confirmed the rest.
   New archetype vocabulary: `valley`, `broad_hump` (added to `PROFILE_KINDS`).

@@ -139,7 +139,8 @@ def gen_recurring_profile(
     rng, n: int, spc: int, *, kind: Optional[str] = None, weekly: bool = True,
     amp_jitter: float = 0.18, amp_persist: float = 0.8, noise_amp: float = 0.04,
     hf_noise: float = 0.0, mult_noise: float = 0.0, level_frac: float = 0.0,
-    regime_prob: float = 0.0, trend: float = 0.0,
+    regime_prob: float = 0.0, regime_quiet: Tuple[float, float] = (0.08, 0.3),
+    trend: float = 0.0,
 ) -> Tuple[np.ndarray, int, str]:
     """A **recurring daily profile**: a fixed ``daily_profile`` repeated every ``spc``
     samples, scaled per day by an **autocorrelated** amplitude (``amp_persist`` →
@@ -159,7 +160,7 @@ def gen_recurring_profile(
     if weekly:
         day_amp = day_amp * _weekly_factor(rng, n_days)
     if regime_prob > 0:                                  # active↔quiet usage regimes
-        day_amp = day_amp * _regime_envelope(rng, n_days, regime_prob)
+        day_amp = day_amp * _regime_envelope(rng, n_days, regime_prob, quiet=regime_quiet)
     series = np.concatenate([day_amp[d] * profile for d in range(n_days)])[:n]
     if mult_noise > 0:
         # per-day intra-day texture (e.g. solar cloud cover): a sub-daily smooth factor
