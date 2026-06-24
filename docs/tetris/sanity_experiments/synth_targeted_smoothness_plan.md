@@ -70,6 +70,18 @@ committed **characterizer** is a next step).
   Panels: `docs/tetris/sanity_experiments/synth_panels/h1_1_traffic/`. Subagent visual
   critique drove the `broad_hump` fix (M_DENSE square-wave) and confirmed the rest.
   New archetype vocabulary: `valley`, `broad_hump` (added to `PROFILE_KINDS`).
+- **ETT batch (2026-06-23) — DONE.** Characterized ett1/ett2 (7 channels each, daily
+  season; OT = oil-temp is the last channel). **No new archetype** — like jena, ETT is a
+  heterogeneous multivariate *composed* from existing generators: most load channels =
+  slow multi-month **drift + a rounded daily cycle + noise** (`drift_seasonal` with
+  `daily_amp`), one channel = blocky on/off **load-switch** (`business` + regime), and the
+  **OT** channel = near-pure smooth **drift** (no daily cycle). Recipe `ett` (one recipe
+  covers ett1+ett2, all freqs via period×interval). Channels partially co-move (real
+  cross-corr 0.7–0.99 on the load block, ~0 elsewhere) → `tie=0.3`. Subagent critique
+  caught a **too-clean, too-dominant constant-amplitude daily sine**; fixed by giving the
+  `gen_drift_seasonal` daily cycle **per-day AR(1) amplitude jitter** (waxing/waning under
+  the drift) and lowering its weight so the drift/regime backbone dominates. Panels:
+  `docs/tetris/sanity_experiments/synth_panels/h1_1_ett/`.
 
 ### How to generate data NOW (`src/tetris/data/synth_archetype_recipes.py`)
 The validated recipes + a variety sampler are committed so the generators are usable

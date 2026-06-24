@@ -44,6 +44,31 @@ def _jena_channels() -> List[Tuple[str, dict]]:
     return spec  # type: ignore[return-value]
 
 
+def _ett_channels() -> List[Tuple[str, dict]]:
+    # ETT (electricity transformer) = 7 heterogeneous channels that partially co-move
+    # (load features + oil temperature), like jena. Almost all are a slow multi-month
+    # drift backbone + a rounded daily cycle + noise (drift_seasonal); one load channel is
+    # a blocky on/off load-switch (business + regime); the oil-temp channel (last) is a
+    # near-pure smooth drift with no daily cycle.
+    # daily cycle kept UNDER the drift (lower amp) — real ETT drift/regime dominates and the
+    # daily cycle is a jittered modulation, not the dominant signal (maintainer-critique fix).
+    daily = dict(weekly_amp=0.0, daily_amp=0.45, drift_corr_days=18.0, noise_amp=0.18)
+    daily_noisy = dict(weekly_amp=0.0, daily_amp=0.32, drift_corr_days=14.0, noise_amp=0.35)
+    return [
+        ("drift_seasonal", dict(daily)),                  # ch0: drift + clear daily
+        ("drift_seasonal", dict(daily_noisy)),            # ch1: noisier daily
+        ("drift_seasonal", dict(daily)),                  # ch2: drift + clear daily
+        ("drift_seasonal", dict(daily_noisy)),            # ch3: noisier daily
+        ("drift_seasonal", dict(weekly_amp=0.0, daily_amp=0.22, drift_corr_days=20.0,
+                                noise_amp=0.25)),          # ch4: drift-leaning + weak daily
+        ("recurring", dict(kind="business", weekly=False, amp_persist=0.85, amp_jitter=0.2,
+                           noise_amp=0.12, regime_prob=0.06,
+                           regime_quiet=(0.05, 0.2))),      # ch5: blocky load-switch
+        ("drift_seasonal", dict(weekly_amp=0.0, daily_amp=0.05, drift_corr_days=24.0,
+                                noise_amp=0.08)),           # ch6: oil-temp, near-pure drift
+    ]
+
+
 RECIPES: Dict[str, dict] = {
     "solar": {"period_min": 1440, "tie": 0.0, "channels": [
         ("recurring", dict(kind="pulse", weekly=False, amp_jitter=0.12, amp_persist=0.7,
@@ -57,6 +82,9 @@ RECIPES: Dict[str, dict] = {
     "covid": {"period_min": 1440, "tie": 0.0, "channels": [
         ("growth", dict(kind="logistic"))]},
     "jena": {"period_min": 1440, "tie": 0.3, "channels": _jena_channels()},
+    # ETT (ett1/ett2): 7 heterogeneous transformer channels (load + oil temp) that
+    # partially co-move — drift+daily, a blocky load-switch, and a near-pure-drift OT.
+    "ett": {"period_min": 1440, "tie": 0.3, "channels": _ett_channels()},
     # traffic FLOW (M_DENSE): clean daily cycle rising from a low night floor to a BROAD
     # daytime plateau (~16h elevated, short night), weekday/weekend contrast. The broad
     # day/short-night proportion is the dominant learnable feature → `business`. snaive ≪

@@ -237,9 +237,14 @@ def gen_drift_seasonal(
         wk_profile = S._standardize(_smooth_resid(rng, wk_spc, corr=max(2.0, wk_spc / 12)))
         reps = int(np.ceil(n / wk_spc))
         out = out + weekly_amp * np.tile(wk_profile, reps)[:n]
-    if daily_amp > 0:                                     # small smooth daily oscillation
+    if daily_amp > 0:                                     # daily oscillation UNDER the drift
+        # a rounded daily cycle whose amplitude **varies day to day** (persistent AR(1)), so
+        # it is a jittered modulation on top of the slow drift — not a clean constant-
+        # amplitude sine (real ETT/weather daily cycles wax and wane across days).
         phase = 2 * np.pi * np.arange(n) / spc + rng.uniform(0, 2 * np.pi)
-        out = out + daily_amp * np.sin(phase)
+        n_days = int(np.ceil(n / spc))
+        damp = _persistent_amp(rng, n_days, jitter=0.45, persist=0.7)
+        out = out + daily_amp * np.repeat(damp, spc)[:n] * np.sin(phase)
     out = S._standardize(out) + noise_amp * S._standardize(_smooth_resid(rng, n, corr=2.0))
     return out.astype(np.float64), 7 * spc
 
