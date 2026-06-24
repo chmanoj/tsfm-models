@@ -255,8 +255,14 @@ The two "remaining" plan items (a `gen_targeted` dispatch + a committed *charact
 ```bash
 export GIFT_EVAL=~/Projects/gifteval/test          # local GIFT-Eval test split
 
-# 1. generate the targeted corpus — 50 series per config (~2850 series, all 56 configs)
+# 1. generate the targeted corpus — 50 series per config
+#    (57 TARGETED_CONFIGS entries [56 configs; temperature_rain = temperature+rain] x 50 = 2850)
 uv run python -m tetris.data.materialize --out artifacts/corpus_recipe --n-recipe 50
+
+# 1b. COMBINED corpus — variety (general) + targeted (test-resembling) in one
+#     50000 variety + 57x50=2850 targeted = 52,850 series, tagged source synth_archetype/synth_recipe
+uv run python -m tetris.data.materialize --out artifacts/corpus_mixed \
+    --n-archetype 50000 --n-recipe 50
 
 # 2. end-to-end validation — per-config 3 REAL vs 3 SYNTH montages (reads $GIFT_EVAL)
 uv run python -m tetris.data.synth_explore validate-corpus artifacts/corpus_recipe \

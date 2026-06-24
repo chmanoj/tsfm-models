@@ -16,11 +16,16 @@ Examples::
         --n-synthetic 20000 --pretrain-root ~/Projects/gifteval/pretrain
 
     # H1.1 TARGETED corpus: N series per GIFT-Eval test config from its validated recipe
-    # (data resembling the test split; each series tagged kind=<config>).
+    # (data resembling the test split; each series tagged kind=<config>). 57 entries x N.
     python -m tetris.data.materialize --out artifacts/corpus_recipe --n-recipe 50
     # then validate per config (needs $GIFT_EVAL):
     #   python -m tetris.data.synth_explore validate-corpus artifacts/corpus_recipe \\
     #       --out-dir artifacts/corpus_validation
+
+    # COMBINED: variety (general) + targeted (test-resembling) in one corpus
+    # -> 50000 + 57*50=2850 = 52,850 series, tagged source synth_archetype / synth_recipe
+    python -m tetris.data.materialize --out artifacts/corpus_mixed \\
+        --n-archetype 50000 --n-recipe 50
 """
 
 from __future__ import annotations
