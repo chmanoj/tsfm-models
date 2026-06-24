@@ -134,8 +134,12 @@ committed **characterizer** is a next step).
 - **DONE:** solar, bizitobs, electricity, covid, jena (prior) + **traffic** (LOOP_SEATTLE /
   M_DENSE / SZ_TAXI), **ETT** (ett1/ett2), **M4** (all 6 freqs) (prior session) + **counts/retail**
   (restaurant / car_parts / hospital / hierarchical_sales D+W) (this session).
-- **REMAINING (next session, in order):** river/births (saugeenday / us_births) → remainder
-  (kdd_cup_2018 / temperature_rain / solar-D/W / electricity-D/W / bitbrains_fast_storage).
+- **REMAINING (next session, in order — maintainer asked to do the remainder batch FIRST):**
+  remainder (kdd_cup_2018 / temperature_rain / solar-D/W / electricity-D/W /
+  bitbrains_fast_storage) → river/births (saugeenday / us_births). Note: solar-D/W and
+  electricity-D/W are coarse re-samplings of already-characterized patterns (period×interval,
+  likely no new archetype); temperature_rain / bitbrains_fast_storage are impulsive (quiet
+  baseline + sparse spikes — close to the existing `spikes` path / `gen_counts` spike mechanism).
 - **Current archetype vocabulary** — `PROFILE_KINDS`: `pulse`, `business`, `double_hump`,
   `single_hump`, **`valley`** (high plateau notched down by dips — traffic speed), **`broad_hump`**
   (wide rounded soft trapezoid — traffic/taxi flow). `gen_recurring_profile` knobs incl.
