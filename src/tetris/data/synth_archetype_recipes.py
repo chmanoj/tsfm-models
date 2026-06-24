@@ -111,6 +111,34 @@ RECIPES: Dict[str, dict] = {
     "traffic_speed": {"period_min": 1440, "tie": 0.0, "channels": [
         ("recurring", dict(kind="valley", weekly=True, amp_jitter=0.10, amp_persist=0.85,
                            noise_amp=0.04, hf_noise=0.09))]},
+    # --- M4 (univariate competition series; trend/growth-dominated, freq-dependent season) ---
+    # m4_hourly: a clean, smooth DAILY cycle (call interval_min=60 ⇒ spc 24) on a slight
+    # trend, low noise — high-SNR. snaive ≪ last on the real.
+    "m4_hourly": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("drift_seasonal", dict(daily_amp=1.3, weekly_amp=0.0, drift_corr_days=10.0,
+                                noise_amp=0.05, hf_noise=0.03, trend=1.0))]},
+    # m4_annual: an ANNUAL cycle + slow drift + trend. One recipe serves m4_monthly
+    # (call interval_min=43800 ⇒ spc 12) and m4_quarterly (interval_min=131400 ⇒ spc 4) via
+    # the period×sampling decoupling. Seasonality is secondary to the trend (as on the real,
+    # where linear/last-value edges seasonal-naive).
+    "m4_annual": {"period_min": 525600, "tie": 0.0, "channels": [
+        ("drift_seasonal", dict(daily_amp=0.55, daily_amp_jitter=0.7, weekly_amp=0.0,
+                                drift_corr_days=4.0, noise_amp=0.22, hf_noise=0.16,
+                                trend=0.8))]},
+    # m4_trend: NON-seasonal trend + random-walk wander (m4_daily / m4_quarterly / m4_yearly) —
+    # a persistent linear trend + the mean-reverting smooth drift, so last-value/linear are
+    # forecastable but the wander makes pure-linear lose (matches the real). (M4 daily/
+    # quarterly/yearly are mostly smooth trended curves with a turning point.)
+    "m4_trend": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("drift_seasonal", dict(daily_amp=0.0, weekly_amp=0.0, drift_corr_days=4.0,
+                                noise_amp=0.04, trend=2.2))]},
+    # m4_spiky: regular SEASONAL spikes — the spiky-seasonal m4_weekly plurality (quiet
+    # baseline + sharp peaks recurring at the ~annual-at-weekly period). Call interval_min=
+    # 10080 ⇒ spc 52 (annual cycle at weekly sampling). One spike per period at a consistent
+    # phase ⇒ seasonal-naive anticipates it (learnable, not random). (Weekly also has a
+    # smooth-growth subtype → use m4_trend with a strong trend for that minority.)
+    "m4_spiky": {"period_min": 525600, "tie": 0.0, "channels": [
+        ("spikes", dict(rate_per_day=0.6, amp=4.0, weekly_amp=0.0, noise_amp=0.1))]},
 }
 
 

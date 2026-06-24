@@ -218,7 +218,8 @@ def _smooth_resid(rng, n: int, corr: float = 4.0) -> np.ndarray:
 
 def gen_drift_seasonal(
     rng, n: int, spc: int, *, drift_corr_days: float = 8.0, weekly_amp: float = 0.0,
-    daily_amp: float = 0.0, noise_amp: float = 0.12, hf_noise: float = 0.0,
+    daily_amp: float = 0.0, daily_amp_jitter: float = 0.45, noise_amp: float = 0.12,
+    hf_noise: float = 0.0, trend: float = 0.0,
 ) -> Tuple[np.ndarray, int]:
     """The **multi-scale weather/drift** archetype (jena): a slow long-correlation drift
     backbone (the seasonal swing, which over a short forecast context reads as persistent
@@ -243,11 +244,17 @@ def gen_drift_seasonal(
         # amplitude sine (real ETT/weather daily cycles wax and wane across days).
         phase = 2 * np.pi * np.arange(n) / spc + rng.uniform(0, 2 * np.pi)
         n_days = int(np.ceil(n / spc))
-        damp = _persistent_amp(rng, n_days, jitter=0.45, persist=0.7)
+        damp = _persistent_amp(rng, n_days, jitter=daily_amp_jitter, persist=0.7)
         out = out + daily_amp * np.repeat(damp, spc)[:n] * np.sin(phase)
+    out = S._standardize(out)
+    if trend:                                            # persistent linear drift of the level
+        # added AFTER standardize so it isn't normalized away — a trend + the (mean-reverting)
+        # smooth drift wander gives the "trend + random-walk wander" character of M4 daily/
+        # weekly/yearly (last-value/linear forecastable, but the wander makes pure-linear lose).
+        out = out + trend * np.linspace(0, 1, n)
     # smooth low-freq residual + optional WHITE high-frequency jitter (real ETT/weather
     # have genuine sample-to-sample noise; the smooth residual alone reads too clean).
-    out = S._standardize(out) + noise_amp * S._standardize(_smooth_resid(rng, n, corr=2.0))
+    out = out + noise_amp * S._standardize(_smooth_resid(rng, n, corr=2.0))
     if hf_noise > 0:
         out = out + hf_noise * rng.normal(0, 1, n)
     return out.astype(np.float64), 7 * spc

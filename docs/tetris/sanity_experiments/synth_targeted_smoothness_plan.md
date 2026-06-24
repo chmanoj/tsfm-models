@@ -88,6 +88,23 @@ committed **characterizer** is a next step).
   comparable to the drift** so the daily cycle is clearly visible at fine sampling. Subagent
   re-review confirmed all three issues fixed with no regressions (daily not buried, OT still
   smooth, no clipping). Panels: `docs/tetris/sanity_experiments/synth_panels/h1_1_ett/`.
+- **M4 batch (2026-06-23) — DONE.** Characterized all 6 M4 freqs (univariate, **highly
+  diverse within each config** — thousands of series). **Trend/growth-dominated** with
+  frequency-dependent seasonality. **No new archetype** — composed from existing generators,
+  enabled by adding a **`trend`** param to `gen_drift_seasonal` (persistent linear drift, so
+  `trend + mean-reverting wander` = M4's "random-walk-ish trend" where last-value/linear win
+  but pure-linear loses) and a **`daily_amp_jitter`** param (per-cycle peak-height variation).
+  Four recipes mapped to the 6 configs by dominant character: `m4_hourly` (clean daily cycle
+  + slight trend); `m4_trend` (non-seasonal trend + wander → daily / quarterly / yearly);
+  `m4_annual` (annual cycle + drift + trend → monthly, and quarterly's seasonal minority — one
+  recipe serves spc 12 *and* 4 via period×interval); `m4_spiky` (regular seasonal spikes →
+  weekly's spiky-seasonal plurality; weekly also has a smooth-growth subtype → `m4_trend`).
+  Two subagent rounds: round-1 flagged the seasonal recipes as too-clean textbook sines →
+  added `daily_amp_jitter` + meandering drift; round-2 "ship it"; then maintainer flagged
+  monthly still too clean → added `hf_noise`/larger residual (real monthly is noisy, not a
+  clean sine). Panels: `docs/tetris/sanity_experiments/synth_panels/h1_1_m4/`. Note: M4's
+  within-config diversity is best served by the *variety sampler* mixing these archetypes,
+  not one fixed recipe per config.
 
 ### How to generate data NOW (`src/tetris/data/synth_archetype_recipes.py`)
 The validated recipes + a variety sampler are committed so the generators are usable

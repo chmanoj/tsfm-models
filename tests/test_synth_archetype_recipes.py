@@ -38,6 +38,18 @@ def test_traffic_daily_recipes_seasonal_naive_learnable():
         assert snaive < 0.8 * last, f"{name}: snaive {snaive:.2f} not < last {last:.2f}"
 
 
+def test_m4_hourly_recipe_seasonal_naive_learnable():
+    # m4_hourly is a clean daily cycle — seasonal-naive must clearly beat last-value,
+    # the way it does on the real m4_hourly.
+    season = 24
+    x = R.gen_from_recipe(np.random.default_rng(0), "m4_hourly", 1000, interval_min=60)[0]
+    ctx, y = x[:-season], x[-season:]
+    scale = float(np.mean(np.abs(np.diff(ctx)))) + 1e-8
+    last = np.mean(np.abs(ctx[-1] - y)) / scale
+    snaive = np.mean(np.abs(ctx[-season:] - y)) / scale
+    assert snaive < 0.8 * last
+
+
 def test_gen_variety_finite_and_varied():
     fams = set()
     for i in range(30):
