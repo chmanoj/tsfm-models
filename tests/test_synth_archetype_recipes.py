@@ -23,6 +23,21 @@ def test_recipe_period_sampling_decoupling():
     assert cycles(tenmin) < cycles(hourly)               # 10-min: fewer, wider cycles in 4000 pts
 
 
+def test_traffic_daily_recipes_seasonal_naive_learnable():
+    # the daily-cycle traffic recipes (valley speed, broad-hump flow) must be learnable the
+    # way the real data is: seasonal-naive clearly beats last-value (the daily profile
+    # repeats). taxi_demand is a noise-dominated weak cycle (excluded — snaive only just
+    # beats last there, by design).
+    season = 24
+    for name in ("traffic_speed", "traffic_flow"):
+        x = R.gen_from_recipe(np.random.default_rng(0), name, 3000, interval_min=60)[0]
+        ctx, y = x[:-season], x[-season:]
+        scale = float(np.mean(np.abs(np.diff(ctx)))) + 1e-8
+        last = np.mean(np.abs(ctx[-1] - y)) / scale
+        snaive = np.mean(np.abs(ctx[-season:] - y)) / scale
+        assert snaive < 0.8 * last, f"{name}: snaive {snaive:.2f} not < last {last:.2f}"
+
+
 def test_gen_variety_finite_and_varied():
     fams = set()
     for i in range(30):

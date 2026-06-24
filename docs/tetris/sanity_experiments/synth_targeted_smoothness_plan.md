@@ -49,6 +49,23 @@ shifts; snaive matches real 0.35), covid (growth), jena (archetype-level multiva
 The visual loop CLI is `synth_visual.py`; throwaway exploration lived in `/tmp` (the
 committed **characterizer** is a next step).
 
+#### Batch progress (continuing the hand-characterization, 3–4 datasets per batch)
+- **Traffic batch (2026-06-23) — DONE.** Characterized LOOP_SEATTLE, M_DENSE, SZ_TAXI
+  (full-series, multi-scale, per-channel snaive-vs-last; all univariate, daily season).
+  Three distinct learnable shapes, all snaive≪last on the real:
+  - **LOOP_SEATTLE (speed)** → NEW `valley` profile: a high free-flow plateau notched
+    *down* by sharp asymmetric rush-hour dips (the inverse of `double_hump`). Recipe
+    `traffic_speed`. Validated cleanly at hourly; at 5T the real is near its noise floor
+    (snaive≈last≈2.9) so synth is intentionally cleaner/more-learnable (don't chase noise).
+  - **M_DENSE (flow)** → NEW `broad_hump` profile: a wide rounded daytime (~0.6 of the day,
+    large taper) over a short low night — a soft trapezoid, *not* the square wave `business`
+    gave nor the too-narrow `single_hump`. Recipe `traffic_flow`.
+  - **SZ_TAXI (demand)** → a noisy weak daily cycle (periodicity buried in noise), modeled
+    with `drift_seasonal` (small `daily_amp`, large `noise_amp`). Recipe `taxi_demand`.
+  Panels: `docs/tetris/sanity_experiments/synth_panels/h1_1_traffic/`. Subagent visual
+  critique drove the `broad_hump` fix (M_DENSE square-wave) and confirmed the rest.
+  New archetype vocabulary: `valley`, `broad_hump` (added to `PROFILE_KINDS`).
+
 ### How to generate data NOW (`src/tetris/data/synth_archetype_recipes.py`)
 The validated recipes + a variety sampler are committed so the generators are usable
 today (the per-config params won't be lost in throwaway scripts).

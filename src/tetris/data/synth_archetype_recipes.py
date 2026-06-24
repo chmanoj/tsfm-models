@@ -57,6 +57,24 @@ RECIPES: Dict[str, dict] = {
     "covid": {"period_min": 1440, "tie": 0.0, "channels": [
         ("growth", dict(kind="logistic"))]},
     "jena": {"period_min": 1440, "tie": 0.3, "channels": _jena_channels()},
+    # traffic FLOW (M_DENSE): clean daily cycle rising from a low night floor to a BROAD
+    # daytime plateau (~16h elevated, short night), weekday/weekend contrast. The broad
+    # day/short-night proportion is the dominant learnable feature → `business`. snaive ≪
+    # last on the real.
+    "traffic_flow": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("recurring", dict(kind="broad_hump", weekly=True, amp_jitter=0.18, amp_persist=0.6,
+                           noise_amp=0.06, hf_noise=0.09))]},
+    # taxi DEMAND (SZ_TAXI): a WEAK daily cycle drowned in heavy noise + occasional level
+    # shifts — snaive only just beats last on the real (not a clean hump). Modeled as a
+    # small daily oscillation on a persistent drift with a large residual.
+    "taxi_demand": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("drift_seasonal", dict(weekly_amp=0.0, daily_amp=0.6, drift_corr_days=4.0,
+                                noise_amp=0.7))]},
+    # traffic SPEED (LOOP_SEATTLE): high free-flow plateau notched DOWN by two rush-hour
+    # dips/day (the `valley` profile) + heavy HF jitter (speed is noisy at 5T/H).
+    "traffic_speed": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("recurring", dict(kind="valley", weekly=True, amp_jitter=0.10, amp_persist=0.85,
+                           noise_amp=0.04, hf_noise=0.09))]},
 }
 
 

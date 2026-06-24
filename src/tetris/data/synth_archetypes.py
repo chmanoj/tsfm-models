@@ -32,7 +32,7 @@ import numpy as np
 from . import synthetic as S
 
 # Recognized recurring-profile shapes.
-PROFILE_KINDS = ("pulse", "business", "double_hump", "single_hump")
+PROFILE_KINDS = ("pulse", "business", "double_hump", "single_hump", "valley", "broad_hump")
 GROWTH_KINDS = ("linear", "logistic", "exponential")
 
 
@@ -75,6 +75,24 @@ def daily_profile(rng, spc: int, kind: str) -> np.ndarray:
         a1, a2 = rng.uniform(0.5, 0.9), rng.uniform(0.8, 1.2)
         prof = (0.35 + a1 * _raised_bump(phase, rng.uniform(0.30, 0.40), 0.06)
                 + a2 * _raised_bump(phase, rng.uniform(0.72, 0.82), 0.07))
+    elif kind == "valley":                                # traffic SPEED: high plateau, rush dips
+        # The inverse of double_hump — a high free-flow plateau (≈1) notched *down* by two
+        # rush-hour congestion dips (LOOP_SEATTLE: AM + PM, asymmetric depth). Real daily
+        # speed sits high almost all day and drops sharply twice; seasonal-naive recovers
+        # the dip phases. Floored so it stays a high plateau, not a hump.
+        # narrow + asymmetric dips so the high plateau dominates (real speed sits high
+        # almost all day, then drops *sharply* — a small AM notch + a deep PM dip).
+        d1, d2 = rng.uniform(0.15, 0.40), rng.uniform(0.60, 0.95)
+        prof = (1.0 - d1 * _raised_bump(phase, rng.uniform(0.28, 0.36), 0.035)
+                - d2 * _raised_bump(phase, rng.uniform(0.66, 0.80), 0.045))
+        prof = np.clip(prof, 0.02, 1.0)
+    elif kind == "broad_hump":                            # traffic flow: broad rounded day
+        # a WIDE daytime elevation (~0.6 of the day) with gradual, rounded rise/fall (large
+        # taper) and a short low night — M_DENSE. Unlike `business` (sharp square edges) the
+        # big taper makes a soft trapezoid, not a square wave; unlike `single_hump` it is
+        # wide (broad day, short night), matching the real day/night proportion.
+        prof = 0.08 + _flat_top(phase, rng.uniform(0.12, 0.20), rng.uniform(0.58, 0.70),
+                                taper=rng.uniform(0.34, 0.48))
     else:                                                 # single_hump: one daytime plateau
         prof = 0.12 + _flat_top(phase, rng.uniform(0.30, 0.45), rng.uniform(0.25, 0.45),
                                 taper=rng.uniform(0.30, 0.5))
