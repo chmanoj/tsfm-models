@@ -232,6 +232,33 @@ committed **characterizer** is a next step).
   us_births W/M = annual cycle) reuse existing generators via period×interval — the only new mechanism
   across the last two batches was `gen_counts` `spike_decay` (the hydrograph recession).
 
+#### TARGETED CORPUS — DONE (2026-06-24). `gen_targeted`/characterizer de-scoped.
+The two "remaining" plan items (a `gen_targeted` dispatch + a committed *characterizer*) are resolved:
+- **`gen_targeted` already exists** as `gen_from_recipe` (it dispatches the archetype generators from
+  the stored per-config spec). The missing piece — a corpus *writer* — is now built:
+  **`write_recipe_corpus`** (`synth_archetype_recipes.py`) writes ``n_per_config`` series for EVERY
+  GIFT-Eval test config from its recipe, at the config's sampling interval, tagged ``kind=<config>``
+  so each config is pullable from the corpus. The full config→(recipe, interval) map is
+  **`TARGETED_CONFIGS`** (covers all 56 groups; temperature_rain = temperature+rain; a few coarse
+  /D-/W resamplings reuse the base recipe — marked `~`). CLI: ``materialize --n-recipe N``.
+- **The characterizer is DROPPED as redundant** — we hand-characterized every config, so the
+  `RECIPES` dict *is* its output; there is nothing left for an auto-deriver to derive (and auto-fitting
+  to stats would risk the [[dont-game-synth-quality-metric]] trap). Keep it only as a future option for
+  brand-new datasets (first-draft + mandatory human visual check).
+- **End-to-end validation tool:** ``synth_explore validate-corpus <corpus> --out-dir …`` plots, per
+  config, 3 random SYNTH series pulled from the corpus (by `kind`) vs 3 random REAL series. Verified a
+  50-per-config corpus (2850 series) against the real test split — strong match on all characterized
+  configs; weak spots are the coarse `~` /D resamplings (LOOP_SEATTLE/D, M_DENSE/D) and `m4_weekly`
+  (a genuinely mixed config). Plots are run artifacts (gitignored), not committed.
+
+#### Revised next steps (post-characterization)
+1. *(optional, small)* wire the `gen_counts` family + new knobs into **`gen_variety`** so the *variety*
+   corpus also covers counts/impulsive/hydrograph (currently it samples only recurring/growth/
+   drift_seasonal/spikes/multivariate).
+2. **The 20M validation run** — train ~20M on a corpus (variety and/or `--n-recipe` targeted) via the
+   streaming loader, eval zero-shot on the GIFT-Eval test split (10 items/config). The eval block is
+   the part to get right.
+
 #### Committed tooling (`src/tetris/data/synth_explore.py`)
 The per-dataset workflow tools (replaces the throwaway scratchpad scripts). Reads real data
 via `$GIFT_EVAL`. CLI:

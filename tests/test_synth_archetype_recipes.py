@@ -80,6 +80,27 @@ def test_electricity_coarse_regime_blocks_have_quiet_and_active_stretches():
         assert mu.max() - mu.min() > 1.2, f"{name}: no active↔quiet regime contrast"
 
 
+def test_targeted_configs_cover_all_and_use_valid_recipes():
+    # every entry references a real recipe and covers the 56 GIFT-Eval test groups
+    for config, recipe, interval in R.TARGETED_CONFIGS:
+        assert recipe in R.RECIPES, (config, recipe)
+        assert interval > 0
+    assert len({c for c, _, _ in R.TARGETED_CONFIGS}) == 56  # temperature_rain = 2 entries, 1 config
+
+
+def test_write_recipe_corpus_round_trips_and_tags_each_config():
+    import tempfile
+    from tetris.data.shards import ShardWriter, ShardReader
+    with tempfile.TemporaryDirectory() as d:
+        with ShardWriter(d, shard_size=1000, builder={}) as w:
+            n = R.write_recipe_corpus(w, n_per_config=1, seed=0, length_range=(512, 700))
+        r = ShardReader(d)
+        assert n == len(R.TARGETED_CONFIGS) == r.n_series
+        kinds = {r.meta(i)["kind"] for i in range(r.n_series)}
+        assert len(kinds) == 56                              # pullable per config via `kind`
+        assert all(np.isfinite(r.read_array(i)).all() for i in range(r.n_series))
+
+
 def test_gen_variety_finite_and_varied():
     fams = set()
     for i in range(30):

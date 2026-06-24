@@ -299,6 +299,89 @@ RECIPES: Dict[str, dict] = {
 }
 
 
+# --- targeted corpus: config -> (recipe, sampling interval) for ALL GIFT-Eval test configs ---
+# Each GIFT-Eval test config is generated from its validated recipe at the config's sampling
+# interval; samples-per-cycle = recipe.period_min / interval_min, so one recipe serves multiple
+# frequencies (the period x sampling decoupling). A few coarse re-samplings that were NOT
+# separately characterized (ett/D-W, jena/D, LOOP_SEATTLE/D, M_DENSE/D) reuse the base recipe at
+# the coarse interval (the daily cycle collapses and the drift/level backbone dominates — an
+# approximation, marked "~"). temperature_rain is a MIXED config -> two entries (temperature+rain).
+TARGETED_CONFIGS: List[Tuple[str, str, int]] = [
+    # traffic
+    ("LOOP_SEATTLE/5T", "traffic_speed", 5), ("LOOP_SEATTLE/H", "traffic_speed", 60),
+    ("LOOP_SEATTLE/D", "traffic_speed", 1440),                       # ~ coarse
+    ("M_DENSE/H", "traffic_flow", 60), ("M_DENSE/D", "traffic_flow", 1440),  # ~ coarse
+    ("SZ_TAXI/15T", "taxi_demand", 15), ("SZ_TAXI/H", "taxi_demand", 60),
+    # bitbrains (fast_storage + rnd share the quiet-baseline+spikes family)
+    ("bitbrains_fast_storage/5T", "bitbrains", 5), ("bitbrains_fast_storage/H", "bitbrains", 60),
+    ("bitbrains_rnd/5T", "bitbrains", 5), ("bitbrains_rnd/H", "bitbrains", 60),
+    # bizitobs (business cycle; interval set so spc matches the real season)
+    ("bizitobs_application", "bizitobs", 4), ("bizitobs_service", "bizitobs", 4),
+    ("bizitobs_l2c/5T", "bizitobs", 5), ("bizitobs_l2c/H", "bizitobs", 60),
+    # covid (growth)
+    ("covid_deaths", "covid", 1440),
+    # electricity (fine = double-hump load; coarse = regime blocks)
+    ("electricity/15T", "electricity", 15), ("electricity/H", "electricity", 60),
+    ("electricity/D", "electricity_daily", 1440), ("electricity/W", "electricity_weekly", 10080),
+    # ETT (drift + daily; coarse drops the daily cycle -> drift-dominated approximation)
+    ("ett1/15T", "ett", 15), ("ett1/H", "ett", 60), ("ett1/D", "ett", 1440), ("ett1/W", "ett", 10080),
+    ("ett2/15T", "ett", 15), ("ett2/H", "ett", 60), ("ett2/D", "ett", 1440), ("ett2/W", "ett", 10080),
+    # counts / retail / health
+    ("hierarchical_sales/D", "hierarchical_sales", 1440),
+    ("hierarchical_sales/W", "hierarchical_sales", 10080),
+    ("hospital", "hospital", 43800), ("restaurant", "restaurant", 1440),
+    ("car_parts_with_missing", "car_parts", 43800),
+    # jena (21-channel weather; coarse /D drops the daily cycle)
+    ("jena_weather", "jena", 10), ("jena_weather/10T", "jena", 10),
+    ("jena_weather/H", "jena", 60), ("jena_weather/D", "jena", 1440),       # ~ coarse
+    # kdd pollution
+    ("kdd_cup_2018_with_missing/H", "kdd_pollution", 60),
+    ("kdd_cup_2018_with_missing/D", "kdd_pollution", 1440),
+    # M4 (per-subtype recipes)
+    ("m4_hourly", "m4_hourly", 60), ("m4_daily", "m4_trend", 1440),
+    ("m4_weekly", "m4_spiky", 10080), ("m4_monthly", "m4_annual", 43800),
+    ("m4_quarterly", "m4_annual", 131400), ("m4_yearly", "m4_trend", 1440),
+    # river / births
+    ("saugeenday/D", "saugeenday_daily", 1440), ("saugeenday/W", "saugeenday_weekly", 10080),
+    ("saugeenday/M", "saugeenday_monthly", 43800),
+    ("us_births/D", "us_births_daily", 1440), ("us_births/W", "us_births_weekly", 10080),
+    ("us_births/M", "us_births_monthly", 43800),
+    # solar (fine = daily pulse; coarse = annual envelope)
+    ("solar/10T", "solar", 10), ("solar/H", "solar", 60),
+    ("solar/D", "solar_daily", 1440), ("solar/W", "solar_weekly", 10080),
+    # temperature_rain — MIXED config: temperature wander + intermittent rain
+    ("temperature_rain_with_missing", "temperature", 1440),
+    ("temperature_rain_with_missing", "rain", 1440),
+]
+
+
+def write_recipe_corpus(writer, *, n_per_config: int, seed: int = 0,
+                        length_range: Tuple[int, int] = (512, 4096),
+                        source: str = "synth_recipe") -> int:
+    """Write the **targeted** corpus — ``n_per_config`` series for EACH GIFT-Eval test config in
+    :data:`TARGETED_CONFIGS`, generated from that config's validated recipe at its sampling
+    interval. Each series gets a randomized length (≥ ~4 cycles where the period allows) and seed;
+    the series is tagged with ``kind = <config name>`` so it can be pulled back out per config
+    (e.g. for validation). Returns the total number of series written."""
+    lo, hi = int(length_range[0]), int(length_range[1])
+    total = 0
+    for ci, (config, recipe, interval) in enumerate(TARGETED_CONFIGS):
+        rec = RECIPES[recipe]
+        spc_raw = A.samples_per_cycle(rec["period_min"], interval)
+        for j in range(int(n_per_config)):
+            rng = np.random.default_rng((int(seed), 0x7EC0, ci, j))
+            n_min = min(hi, max(lo, 4 * spc_raw))               # ~4 cycles where it fits
+            n = int(rng.integers(n_min, hi + 1)) if hi > n_min else hi
+            data = gen_from_recipe(rng, recipe, n=n, interval_min=interval)
+            data = np.ascontiguousarray(np.atleast_2d(data), dtype=np.float32)
+            C = data.shape[0]
+            spc_used = int(np.clip(spc_raw, 4, max(4, n // 3)))
+            writer.add(data, 0, C, season_length=spc_used, source=source,
+                       kind=config, item_id=f"{recipe}|{config}|{j}")
+            total += 1
+    return total
+
+
 def gen_from_recipe(rng, name: str, n: int, *, interval_min: int = 10) -> np.ndarray:
     """Generate ``[C, n]`` for a characterized config from its validated recipe. The daily
     period is rendered at ``interval_min`` (so ``samples_per_cycle = period/interval`` —

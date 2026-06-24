@@ -190,6 +190,50 @@ def panel_multivar(real_config: str, recipe: str, interval_min: int, out_path: s
     return str(out_path)
 
 
+def validate_corpus(corpus_dir: str, out_dir: str, *, k: int = 3, win: int = 1500,
+                    per_montage: int = 12, local_dir: str = "", seed: int = 0) -> None:
+    """End-to-end corpus validation: for each GIFT-Eval config, plot ``k`` random SYNTH series
+    pulled from a materialized recipe corpus (filtered by ``kind`` = config name) against ``k``
+    random REAL series, z-scored, side by side. Montages of ``per_montage`` configs each."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from collections import defaultdict
+    from .shards import ShardReader
+
+    rd = ShardReader(corpus_dir)
+    by_kind: dict = defaultdict(list)
+    for i in range(rd.n_series):
+        by_kind[rd.meta(i)["kind"]].append(i)
+    configs = sorted(by_kind)
+    rng = np.random.default_rng(seed)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    def tail_z(x):
+        z = _z(x); return z[-min(len(z), win):]
+
+    for m0 in range(0, len(configs), per_montage):
+        chunk = configs[m0:m0 + per_montage]
+        fig, ax = plt.subplots(len(chunk), 2, figsize=(14, 1.5 * len(chunk)), squeeze=False)
+        for row, cfg in enumerate(chunk):
+            pick = rng.choice(by_kind[cfg], size=min(k, len(by_kind[cfg])), replace=False)
+            syns = [tail_z(rd.read_array(int(g))[0]) for g in pick]
+            try:
+                reals = [tail_z(d[0]) for d, _ in _real_items(cfg, k, local_dir=local_dir)[:k]]
+            except Exception:
+                reals = []
+            for col, (series, color, tag) in enumerate(((reals, "tab:blue", "REAL"),
+                                                        (syns, "tab:orange", "SYNTH"))):
+                for s in series:
+                    ax[row][col].plot(s, lw=0.6, alpha=0.8, color=color)
+                ax[row][col].set_title(f"{tag}  {cfg}  (n={len(series)})", fontsize=7)
+                ax[row][col].tick_params(labelsize=5)
+        fig.tight_layout()
+        p = Path(out_dir) / f"validate_{m0 // per_montage:02d}.png"
+        fig.savefig(p, dpi=110); plt.close(fig)
+        print("wrote", p)
+
+
 def main() -> None:  # pragma: no cover - manual entrypoint / produces artifacts
     import argparse
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -215,6 +259,13 @@ def main() -> None:  # pragma: no cover - manual entrypoint / produces artifacts
     pm.add_argument("--gen-len", type=int, default=4000)
     pm.add_argument("--local-dir", default="")
 
+    pv = sub.add_parser("validate-corpus", help="per-config REAL-vs-SYNTH montages from a recipe corpus")
+    pv.add_argument("corpus"); pv.add_argument("--out-dir", required=True)
+    pv.add_argument("--k", type=int, default=3)
+    pv.add_argument("--win", type=int, default=1500)
+    pv.add_argument("--per-montage", type=int, default=12)
+    pv.add_argument("--local-dir", default="")
+
     a = ap.parse_args()
     if a.cmd == "characterize":
         characterize(a.configs, n=a.n, out_dir=a.out_dir, local_dir=a.local_dir)
@@ -224,6 +275,9 @@ def main() -> None:  # pragma: no cover - manual entrypoint / produces artifacts
     elif a.cmd == "panel-mv":
         print("wrote", panel_multivar(a.config, a.recipe, a.interval, a.out,
                                       gen_len=a.gen_len, local_dir=a.local_dir))
+    elif a.cmd == "validate-corpus":
+        validate_corpus(a.corpus, a.out_dir, k=a.k, win=a.win,
+                        per_montage=a.per_montage, local_dir=a.local_dir)
 
 
 if __name__ == "__main__":  # pragma: no cover
