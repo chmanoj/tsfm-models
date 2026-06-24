@@ -251,12 +251,15 @@ RECIPES: Dict[str, dict] = {
     # NEW `spike_decay` recession. D and W differ only in the recession length in SAMPLES (the
     # event lasts ~3 weeks ⇒ ~18 samples at D, ~3 at W) ⇒ two recipes. Real last < lin (mean-
     # reverting to baseline): a flood spike landing in the horizon is unpredictable (hard).
+    # the floods recur with an ANNUAL rhythm (spike_season_spc — 365 @D / 52 @W) and a slow
+    # amplitude wave (bigger spring freshets), not uniformly at random (maintainer); each event
+    # keeps the asymmetric hydrograph recession.
     "saugeenday_daily": {"period_min": 1440, "tie": 0.0, "channels": [
         ("counts", dict(level=40.0, dispersion=0.12, level_drift=0.5, level_corr_days=2.0,
-                        spike_rate=0.007, spike_amp=7.0, spike_decay=15.0))]},
+                        spike_rate=0.012, spike_amp=7.0, spike_decay=15.0, spike_season_spc=365.0))]},
     "saugeenday_weekly": {"period_min": 1440, "tie": 0.0, "channels": [
         ("counts", dict(level=40.0, dispersion=0.12, level_drift=0.5, level_corr_days=4.0,
-                        spike_rate=0.022, spike_amp=7.0, spike_decay=3.0))]},
+                        spike_rate=0.035, spike_amp=7.0, spike_decay=3.0, spike_season_spc=52.0))]},
     # saugeenday_monthly — the monthly aggregate reveals a strong ANNUAL freshet cycle (real
     # snaive 0.31 ≪ last 0.86): a sharp spring peak repeating yearly on a low baseline. A
     # `recurring` single_hump at the annual period (spc 12 @M) is the repeating peak (seasonal-
@@ -265,24 +268,28 @@ RECIPES: Dict[str, dict] = {
         ("recurring", dict(kind="single_hump", weekly=False, amp_jitter=0.35, amp_persist=0.4,
                            noise_amp=0.05, hf_noise=0.05, mult_noise=0.15))]},
     # us_births = BIRTH COUNTS. Daily has a strong WEEKLY cycle (weekday-high / weekend-low —
-    # scheduled deliveries) + a slow multi-year drift. The weekend dip is SHALLOW (~20%, not a
-    # deep trough) ⇒ a `business` weekly profile (spc 7 @D) blended with a dominant persistent
-    # `level` (level_frac) that both shallows the dip AND carries the slow drift. snaive-at-7
-    # beats last (the weekly profile repeats).
+    # scheduled deliveries) + a slow multi-year drift. The weekly swing is sizeable and the
+    # pattern is REGULAR/predictable (maintainer) ⇒ a `business` weekly profile (spc 7 @D) with a
+    # deeper swing (lower level_frac) and a clean low-noise cycle; the persistent `level` still
+    # carries the slow drift. snaive-at-7 beats last (the weekly profile repeats).
     "us_births_daily": {"period_min": 10080, "tie": 0.0, "channels": [
         ("recurring", dict(kind="business", weekly=False, amp_jitter=0.08, amp_persist=0.9,
-                           noise_amp=0.12, hf_noise=0.08, level_frac=0.7))]},
-    # us_births W / M — weekly/monthly aggregation removes the day-of-week pattern; what remains
-    # is a rounded ANNUAL cycle on a slow multi-year drift (drift_seasonal: an annual `daily_amp`
-    # sine = the repeating yearly cycle, + a multi-year drift backbone). Split by predictability:
-    # M is a CLEAN annual cycle (real snaive 0.30 ≪ last 1.00 — very learnable, low noise), W is
-    # NOISIER (real last 2.69, harder). Same archetype, different residual weight.
+                           noise_amp=0.05, hf_noise=0.03, level_frac=0.45))]},
+    # us_births W — a FIXED annual pattern repeating regularly (a noisy floor, a sudden rise to a
+    # peak, a fall back to the floor) whose peak height WAVES slowly over the years (an overall
+    # low-freq multi-year envelope), maintainer. A `recurring` single_hump at the ANNUAL period
+    # (spc 52 @W) gives the repeating floor→rise→peak→fall pattern; high `amp_persist` makes the
+    # per-YEAR amplitude an AR(1) that wanders slowly ⇒ the long-term wave; mult/hf noise give the
+    # noisy floor + year-to-year randomness.
     "us_births_weekly": {"period_min": 525600, "tie": 0.0, "channels": [
-        ("drift_seasonal", dict(daily_amp=0.9, daily_amp_jitter=0.3, weekly_amp=0.0,
-                                drift_corr_days=2.5, noise_amp=0.24, hf_noise=0.1))]},
+        ("recurring", dict(kind="broad_hump", weekly=False, amp_jitter=0.3, amp_persist=0.85,
+                           noise_amp=0.22, hf_noise=0.1, mult_noise=0.3, level_frac=0.45))]},
+    # us_births M — a rounded ANNUAL cycle + multi-year drift (drift_seasonal annual `daily_amp`
+    # sine). Real M is strongly seasonal (snaive 0.30 ≪ last) but NOT a clean sine — it carries
+    # real month-to-month noise (maintainer: "we need noise"), so a sizeable residual on top.
     "us_births_monthly": {"period_min": 525600, "tie": 0.0, "channels": [
-        ("drift_seasonal", dict(daily_amp=1.3, daily_amp_jitter=0.18, weekly_amp=0.0,
-                                drift_corr_days=4.0, noise_amp=0.1, hf_noise=0.04))]},
+        ("drift_seasonal", dict(daily_amp=1.6, daily_amp_jitter=0.15, weekly_amp=0.0,
+                                drift_corr_days=4.0, noise_amp=0.18, hf_noise=0.09))]},
 }
 
 

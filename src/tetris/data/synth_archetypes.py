@@ -264,8 +264,8 @@ def gen_counts(
     rng, n: int, spc: int, *, level: float = 20.0, dispersion: float = 1.0,
     level_drift: float = 0.4, level_corr_days: float = 10.0, season_amp: float = 0.0,
     trend: float = 0.0, intermittent: float = 0.0, spike_rate: float = 0.0,
-    spike_amp: float = 10.0, spike_decay: float = 0.0, shift_amp: float = 0.0,
-    shift_corr_days: float = 1.5,
+    spike_amp: float = 10.0, spike_decay: float = 0.0, spike_season_spc: float = 0.0,
+    shift_amp: float = 0.0, shift_corr_days: float = 1.5,
 ) -> Tuple[np.ndarray, int]:
     """A non-negative **count / intermittent-demand** archetype — the retail/health family
     (restaurant, hospital, car_parts, hierarchical_sales) that no smooth-backbone generator
@@ -277,7 +277,10 @@ def gen_counts(
     **intermittency** (zero-inflation — most steps zero, rare small demands, as in
     car_parts) and optional **sparse large spikes** on a low baseline (hierarchical_sales),
     which can be given an **asymmetric exponential recession** (``spike_decay`` — a fast rise
-    then a slow decay tail, the river-flow *hydrograph* shape: saugeenday flood events).
+    then a slow decay tail, the river-flow *hydrograph* shape: saugeenday flood events) and a
+    **seasonal envelope** (``spike_season_spc`` — an annual period in samples over which the
+    spike *probability and amplitude* concentrate, so floods recur with an annual rhythm and a
+    slow amplitude wave rather than uniformly at random: the recurring spring-freshet pattern).
 
     Learnable the way the real count data is: the *level* persists so last-value / linear
     forecast it (and any seasonal modulation repeats → seasonal-naive), while the count
@@ -318,8 +321,17 @@ def gen_counts(
     if intermittent > 0:                                  # zero-inflation (intermittent demand)
         counts = counts * (rng.random(n) >= float(np.clip(intermittent, 0.0, 0.99)))
     if spike_rate > 0:                                    # sparse large spikes on a low base
-        mask = rng.random(n) < spike_rate
-        spikes = mask * spike_amp * max(1e-3, level) * rng.uniform(0.5, 1.5, n)
+        if spike_season_spc and spike_season_spc > 1:
+            # an annual envelope: floods recur with a seasonal RHYTHM (cluster near the high
+            # season, e.g. spring snowmelt) with a slow amplitude wave — not uniform random.
+            ph = 2 * np.pi * np.arange(n) / float(spike_season_spc) + rng.uniform(0, 2 * np.pi)
+            env = (0.5 + 0.5 * np.sin(ph)) ** 2           # 0..1, concentrated near the peak
+            prob = spike_rate * (0.25 + 1.5 * env)        # higher probability in season
+            amp_env = 0.4 + 1.3 * env                     # and larger events in season
+        else:
+            prob = np.full(n, float(spike_rate)); amp_env = np.ones(n)
+        mask = rng.random(n) < prob
+        spikes = mask * spike_amp * max(1e-3, level) * rng.uniform(0.5, 1.5, n) * amp_env
         if spike_decay > 0:
             # river hydrograph: each event RISES sharply then RECESSES (slow exponential
             # decay tail) — an asymmetric flood pulse, not a symmetric impulse. Causal

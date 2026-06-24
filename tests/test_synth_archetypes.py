@@ -167,6 +167,21 @@ def test_counts_spike_decay_is_asymmetric_recession():
         assert tail[5] > tail[20]                       # and slowly receding (decay tail)
 
 
+def test_counts_spike_season_concentrates_events():
+    # the seasonal spike envelope makes events recur with an annual RHYTHM (cluster near the
+    # high season) instead of uniformly at random: binning the spike mass by annual phase, the
+    # peak-phase bin should carry clearly more spike energy than the trough-phase bin.
+    spc_year = 120
+    x, _ = A.gen_counts(np.random.default_rng(7), 6000, 7, level=5.0, dispersion=0.0,
+                        level_drift=0.0, spike_rate=0.05, spike_amp=15.0,
+                        spike_season_spc=float(spc_year))
+    phase = (np.arange(len(x)) % spc_year) / spc_year
+    # energy above the quiet baseline, summed in 8 phase bins
+    excess = np.clip(x - np.median(x), 0, None)
+    bins = np.array([excess[(phase >= b / 8) & (phase < (b + 1) / 8)].sum() for b in range(8)])
+    assert bins.max() > 2.0 * (bins.mean() + 1e-9)           # a phase band dominates (vs ~1.0 uniform)
+
+
 def test_saugeenday_monthly_seasonal_naive_learnable():
     # the monthly river aggregate has a strong ANNUAL freshet cycle — seasonal-naive (12) must
     # clearly beat last-value, the way it does on the real saugeenday/M (snaive 0.73 < last).

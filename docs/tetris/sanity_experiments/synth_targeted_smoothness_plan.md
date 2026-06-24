@@ -183,10 +183,15 @@ committed **characterizer** is a next step).
     `daily_amp` sine); **split** by predictability — M is a CLEAN strong annual cycle (real snaive
     0.30 ≪ last, synth 0.45 — large cycle dominates), W is noisier (`us_births_weekly`,
     `us_births_monthly`).
-  - Process: self-inspect → subagent critic (flagged the hydrograph asymmetry / shallow-weekly-dip as
-    the key real features; over-flagged "add noise" on births-W/M where parity says they're already
-    right) → applied the legitimate fixes (quieter saugeen floor, shallower births-D dip), kept the
-    parity-justified configs. Panels: `synth_panels/h1_1_river_births/`. New recipes: saugeenday_daily,
+  - Process: self-inspect → subagent critic → **maintainer feedback round (tiebreaker)** drove a
+    second NEW mechanism + reworks: (i) saugeenday floods looked too random → added `gen_counts`
+    **`spike_season_spc`** (an annual envelope concentrating spike *timing + amplitude* — floods recur
+    with a seasonal rhythm and a slow amplitude wave, not uniform random); (ii) us_births_daily weekly
+    swing too shallow + too noisy → deeper swing (lower `level_frac`) + cleaner/regular; (iii)
+    us_births_weekly was a too-smooth/random sine → reworked to a `recurring` **broad_hump** annual
+    pattern (floor→rise→fall) whose per-year amplitude (`amp_persist`) waves slowly = the long-term
+    wave, with a noisy floor; (iv) us_births_monthly too clean → more noise + a larger swing so it
+    stays seasonal. Panels: `synth_panels/h1_1_river_births/`. New recipes: saugeenday_daily,
     saugeenday_weekly, saugeenday_monthly, us_births_daily, us_births_weekly, us_births_monthly
     (+ tests: spike_decay recession asymmetry, saugeenday_monthly seasonal-naive). **This completes the
     per-dataset hand-characterization of all GIFT-Eval configs.**
@@ -209,7 +214,8 @@ committed **characterizer** is a next step).
   peak-height variation). **NEW `gen_counts`** (overdispersed non-negative integer counts;
   knobs `dispersion`, `intermittent`, `shift_amp` additive held-plateau level shifts,
   `spike_rate`/`spike_amp`, **`season_amp`** weak repeating modulation, **`spike_decay`** asymmetric
-  exponential recession = the river hydrograph) — the counts/intermittent/retail family (and reused for
+  exponential recession = the river hydrograph, **`spike_season_spc`** annual envelope concentrating
+  spike timing+amplitude = recurring freshets) — the counts/intermittent/retail family (and reused for
   non-negative bursty/impulsive data: kdd pollution, bitbrains storage, saugeenday flood).
   Recipes: solar, bizitobs, electricity, covid, jena, ett, traffic_flow, traffic_speed, taxi_demand,
   m4_hourly, m4_trend, m4_annual, m4_spiky, restaurant, hospital, car_parts, hierarchical_sales,
