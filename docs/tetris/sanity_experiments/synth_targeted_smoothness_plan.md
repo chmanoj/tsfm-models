@@ -106,6 +106,57 @@ committed **characterizer** is a next step).
   within-config diversity is best served by the *variety sampler* mixing these archetypes,
   not one fixed recipe per config.
 
+#### Status (end of 2026-06-23 session)
+- **DONE:** solar, bizitobs, electricity, covid, jena (prior) + **traffic** (LOOP_SEATTLE /
+  M_DENSE / SZ_TAXI), **ETT** (ett1/ett2), **M4** (all 6 freqs) (this session).
+- **REMAINING (next session, in order):** counts/retail (restaurant / car_parts_with_missing
+  / hospital / hierarchical_sales) → river/births (saugeenday / us_births) → remainder
+  (kdd_cup_2018 / temperature_rain / solar-D/W / electricity-D/W / bitbrains_fast_storage).
+- **Current archetype vocabulary** — `PROFILE_KINDS`: `pulse`, `business`, `double_hump`,
+  `single_hump`, **`valley`** (high plateau notched down by dips — traffic speed), **`broad_hump`**
+  (wide rounded soft trapezoid — traffic/taxi flow). `gen_recurring_profile` knobs incl.
+  **`regime_quiet`** (active↔quiet contrast depth). `gen_drift_seasonal` knobs incl. **`hf_noise`**
+  (white HF jitter), **`trend`** (persistent linear drift), **`daily_amp_jitter`** (per-cycle
+  peak-height variation). Recipes: solar, bizitobs, electricity, covid, jena, ett, traffic_flow,
+  traffic_speed, taxi_demand, m4_hourly, m4_trend, m4_annual, m4_spiky.
+
+#### Committed tooling (`src/tetris/data/synth_explore.py`)
+The per-dataset workflow tools (replaces the throwaway scratchpad scripts). Reads real data
+via `$GIFT_EVAL`. CLI:
+```bash
+uv run python -m tetris.data.synth_explore characterize ett1/H ett2/H --n 3   # split + multi-scale plots
+uv run python -m tetris.data.synth_explore panel LOOP_SEATTLE/H traffic_speed 60 --out p.png
+uv run python -m tetris.data.synth_explore panel-mv ett1/H ett 60 --out p.png  # multichannel
+```
+`mase_split` = the seasonal-naive/last/linear learnability split (confirms direction only).
+
+#### Per-dataset characterization protocol (FOLLOW EVERY BATCH — established this session)
+1. `uv run pytest` green before touching anything.
+2. **Characterize visual-first** (`synth_explore characterize`): freq/season/channels/length +
+   per-channel **seasonal-naive vs last-value** MASE; plot the **full series at multiple
+   timescales** and **all channels** (never a fixed short window; never a channel subset).
+3. Find the learnable recurring pattern (snaive beats last). **Trust the eye over stats.**
+4. Pick/**extend** an archetype *only* if a genuinely new shape appears — else **compose** from
+   existing generators (ETT/jena are composed, not new). Add a validated recipe to
+   `synth_archetype_recipes.py`.
+5. Validate: snaive(synth)≈snaive(real) **direction** (relative, not an absolute threshold) +
+   eyeball side-by-side at multiple zooms (`synth_explore panel`/`panel-mv`).
+6. Write committed panels under `docs/tetris/sanity_experiments/synth_panels/h1_1_<batch>/`.
+7. **Inspect the panels MYSELF → dispatch a subagent visual critic (multi-zoom) → address EACH
+   issue → fix → re-inspect → re-run the critic to confirm fixed AND nothing regressed.** Never
+   declare done just from generating plots; each issue is fix-then-verify.
+8. `uv run pytest` green; add a learnability test for any new kind/recipe.
+9. Commit **per batch** (recipe + archetype + doc + panels); follow-up commits for feedback fixes.
+10. Present where the plots are; **pause ~15 min** for maintainer feedback; auto-continue to the
+    next batch if no response. Work in batches of **3–4 datasets**.
+- **Principles** (carry every iteration): the **plot is the primary gate; stats only confirm and
+  can be stat-hacked** ([[visual-first-synth-quality]], [[dont-game-synth-quality-metric]]);
+  learnability = snaive>last compared *relatively* ([[learnable-structure-not-smooth-noise]]);
+  real daily shapes are **trapezoids, not sine bells**; **period×sampling decoupling**
+  ([[synth-period-vs-sampling-frequency]]); stop-and-ask on cross-doc ambiguity.
+- **Git hygiene:** don't push (the maintainer pushes; the branch history was rewritten so it
+  needs `--force`); never commit run artifacts (`artifacts/`, `outputs/` are gitignored).
+
 ### How to generate data NOW (`src/tetris/data/synth_archetype_recipes.py`)
 The validated recipes + a variety sampler are committed so the generators are usable
 today (the per-config params won't be lost in throwaway scripts).
@@ -118,7 +169,8 @@ from tetris.data import synth_archetype_recipes as R
 #     interval_min sets samples-per-cycle: solar daily = 144 @10-min, 24 @hourly.
 solar  = R.gen_from_recipe(np.random.default_rng(0), "solar", n=4000, interval_min=10)  # [1, 4000]
 jena   = R.gen_from_recipe(np.random.default_rng(0), "jena",  n=8000, interval_min=10)  # [21, 8000]
-# names: solar, bizitobs, electricity, covid, jena   (RECIPES dict)
+# names: solar, bizitobs, electricity, covid, jena, ett, traffic_flow, traffic_speed,
+#        taxi_demand, m4_hourly, m4_trend, m4_annual, m4_spiky   (RECIPES dict)
 
 # (b) sample the archetype x params x period x sampling cross-product for WIDE VARIETY
 #     (the GENERAL use) — every draw is learnable by construction.
