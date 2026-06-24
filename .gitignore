@@ -223,3 +223,4 @@ outputs/
 prompts/
 src/tetris/data/profiles
 artifacts/
+docs/tetris/sanity_experiments/synth_panels/explore/*
