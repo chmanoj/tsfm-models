@@ -166,17 +166,41 @@ committed **characterizer** is a next step).
   sine+HF; temp fine) → re-tuned + re-verified. Panels: `synth_panels/h1_1_remainder/`. New recipes:
   `kdd_pollution`, `temperature`, `rain`, `solar_daily`, `solar_weekly`, `electricity_daily`,
   `electricity_weekly`, `bitbrains` (+ recipe tests: solar low-freq-envelope guard, electricity
-  regime-contrast). **This completes the per-dataset hand-characterization of the GIFT-Eval configs**
-  (only river/births saugeenday / us_births remain, noted below).
+  regime-contrast). Panels: `synth_panels/h1_1_remainder/`.
+- **River/births batch (2026-06-24) — DONE.** Characterized saugeenday (D/W/M) + us_births (D/W/M).
+  **ONE new mechanism** (`gen_counts` `spike_decay`): an **asymmetric exponential recession** tail on
+  spikes — the river-flow *hydrograph* (fast rise, slow decay). Everything else composes.
+  - **saugeenday** (river flow) — a quiet low baseline + sparse asymmetric FLOOD events (hydrograph).
+    D/W use `gen_counts` + `spike_decay` (recession ~3 weeks ⇒ ~15 samples @D, ~3 @W ⇒ two recipes:
+    `saugeenday_daily`, `saugeenday_weekly`). M (monthly aggregate) reveals a strong ANNUAL freshet —
+    a recurring `single_hump` at the annual period (`saugeenday_monthly`; real snaive 0.73 < last,
+    synth 0.76 — clean seasonal parity). Real D/W are hard-when-a-flood-hits (last < lin); the visual
+    hydrograph + quiet baseline is the gate.
+  - **us_births** — D has a strong WEEKLY cycle (weekday-high / weekend-low, a SHALLOW ~20% dip, not
+    a deep trough) + slow multi-year drift: a `business` weekly profile (spc 7) blended with a
+    dominant persistent `level` (`level_frac`) that shallows the dip *and* carries the drift
+    (`us_births_daily`). W/M = a rounded ANNUAL cycle + multi-year drift (`drift_seasonal` annual
+    `daily_amp` sine); **split** by predictability — M is a CLEAN strong annual cycle (real snaive
+    0.30 ≪ last, synth 0.45 — large cycle dominates), W is noisier (`us_births_weekly`,
+    `us_births_monthly`).
+  - Process: self-inspect → subagent critic (flagged the hydrograph asymmetry / shallow-weekly-dip as
+    the key real features; over-flagged "add noise" on births-W/M where parity says they're already
+    right) → applied the legitimate fixes (quieter saugeen floor, shallower births-D dip), kept the
+    parity-justified configs. Panels: `synth_panels/h1_1_river_births/`. New recipes: saugeenday_daily,
+    saugeenday_weekly, saugeenday_monthly, us_births_daily, us_births_weekly, us_births_monthly
+    (+ tests: spike_decay recession asymmetry, saugeenday_monthly seasonal-naive). **This completes the
+    per-dataset hand-characterization of all GIFT-Eval configs.**
 
 #### Status (end of 2026-06-24 session)
 - **DONE:** solar, bizitobs, electricity, covid, jena (prior) + **traffic** (LOOP_SEATTLE /
   M_DENSE / SZ_TAXI), **ETT** (ett1/ett2), **M4** (all 6 freqs) (prior session) + **counts/retail**
   (restaurant / car_parts / hospital / hierarchical_sales D+W) + **remainder** (kdd_cup_2018 H+D /
-  temperature_rain / solar-D/W / electricity-D/W / bitbrains_fast_storage H+5T) (this session).
-- **REMAINING (next session):** river/births (saugeenday / us_births) — the last hand-characterization
-  batch. Then build the committed characterizer / `gen_targeted` dispatch and the 20M validation run
-  (steps 2–3 of "Next steps" below).
+  temperature_rain / solar-D/W / electricity-D/W / bitbrains_fast_storage H+5T) + **river/births**
+  (saugeenday D/W/M / us_births D/W/M) (this session). **All GIFT-Eval configs now characterized.**
+- **REMAINING (next session):** the per-dataset hand-characterization is COMPLETE. Next is build work,
+  not characterization: the committed characterizer / `gen_targeted` dispatch and the **20M validation
+  run** (steps 2–3 of "Next steps" below) — the first real signal on whether the archetype synth
+  trains a useful zero-shot model.
 - **Current archetype vocabulary** — `PROFILE_KINDS`: `pulse`, `business`, `double_hump`,
   `single_hump`, **`valley`** (high plateau notched down by dips — traffic speed), **`broad_hump`**
   (wide rounded soft trapezoid — traffic/taxi flow). `gen_recurring_profile` knobs incl.
@@ -184,14 +208,17 @@ committed **characterizer** is a next step).
   (white HF jitter), **`trend`** (persistent linear drift), **`daily_amp_jitter`** (per-cycle
   peak-height variation). **NEW `gen_counts`** (overdispersed non-negative integer counts;
   knobs `dispersion`, `intermittent`, `shift_amp` additive held-plateau level shifts,
-  `spike_rate`/`spike_amp`, **`season_amp`** weak repeating modulation) — the counts/intermittent/
-  retail family (and reused for non-negative bursty/impulsive data: kdd pollution, bitbrains storage).
+  `spike_rate`/`spike_amp`, **`season_amp`** weak repeating modulation, **`spike_decay`** asymmetric
+  exponential recession = the river hydrograph) — the counts/intermittent/retail family (and reused for
+  non-negative bursty/impulsive data: kdd pollution, bitbrains storage, saugeenday flood).
   Recipes: solar, bizitobs, electricity, covid, jena, ett, traffic_flow, traffic_speed, taxi_demand,
   m4_hourly, m4_trend, m4_annual, m4_spiky, restaurant, hospital, car_parts, hierarchical_sales,
-  **kdd_pollution, temperature, rain, solar_daily, solar_weekly, electricity_daily, electricity_weekly,
-  bitbrains** (remainder batch). Note: the **coarse re-samplings** (solar-D/W = annual sine envelope;
-  electricity-D/W = trapezoidal regime blocks) reuse existing generators via period×interval — no new
-  archetype was needed for any remainder config.
+  kdd_pollution, temperature, rain, solar_daily, solar_weekly, electricity_daily, electricity_weekly,
+  bitbrains (remainder), **saugeenday_daily, saugeenday_weekly, saugeenday_monthly, us_births_daily,
+  us_births_weekly, us_births_monthly** (river/births). Note: the **coarse re-samplings** (solar-D/W =
+  annual sine envelope; electricity-D/W = trapezoidal regime blocks; saugeenday/M = annual freshet;
+  us_births W/M = annual cycle) reuse existing generators via period×interval — the only new mechanism
+  across the last two batches was `gen_counts` `spike_decay` (the hydrograph recession).
 
 #### Committed tooling (`src/tetris/data/synth_explore.py`)
 The per-dataset workflow tools (replaces the throwaway scratchpad scripts). Reads real data

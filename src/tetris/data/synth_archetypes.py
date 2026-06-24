@@ -264,7 +264,8 @@ def gen_counts(
     rng, n: int, spc: int, *, level: float = 20.0, dispersion: float = 1.0,
     level_drift: float = 0.4, level_corr_days: float = 10.0, season_amp: float = 0.0,
     trend: float = 0.0, intermittent: float = 0.0, spike_rate: float = 0.0,
-    spike_amp: float = 10.0, shift_amp: float = 0.0, shift_corr_days: float = 1.5,
+    spike_amp: float = 10.0, spike_decay: float = 0.0, shift_amp: float = 0.0,
+    shift_corr_days: float = 1.5,
 ) -> Tuple[np.ndarray, int]:
     """A non-negative **count / intermittent-demand** archetype — the retail/health family
     (restaurant, hospital, car_parts, hierarchical_sales) that no smooth-backbone generator
@@ -274,7 +275,9 @@ def gen_counts(
     modulation and a slow ``trend``) drives **overdispersed integer counts** (negative-binomial via
     Gamma–Poisson mixing: variance > mean, ``dispersion`` = 1/r), with optional
     **intermittency** (zero-inflation — most steps zero, rare small demands, as in
-    car_parts) and optional **sparse large spikes** on a low baseline (hierarchical_sales).
+    car_parts) and optional **sparse large spikes** on a low baseline (hierarchical_sales),
+    which can be given an **asymmetric exponential recession** (``spike_decay`` — a fast rise
+    then a slow decay tail, the river-flow *hydrograph* shape: saugeenday flood events).
 
     Learnable the way the real count data is: the *level* persists so last-value / linear
     forecast it (and any seasonal modulation repeats → seasonal-naive), while the count
@@ -316,7 +319,15 @@ def gen_counts(
         counts = counts * (rng.random(n) >= float(np.clip(intermittent, 0.0, 0.99)))
     if spike_rate > 0:                                    # sparse large spikes on a low base
         mask = rng.random(n) < spike_rate
-        counts = counts + mask * spike_amp * max(1e-3, level) * rng.uniform(0.5, 1.5, n)
+        spikes = mask * spike_amp * max(1e-3, level) * rng.uniform(0.5, 1.5, n)
+        if spike_decay > 0:
+            # river hydrograph: each event RISES sharply then RECESSES (slow exponential
+            # decay tail) — an asymmetric flood pulse, not a symmetric impulse. Causal
+            # one-sided exponential kernel (peak at the event, decay forward over ~spike_decay).
+            L = int(min(n, max(2, round(5 * spike_decay))))
+            k = np.exp(-np.arange(L) / float(spike_decay))
+            spikes = np.convolve(spikes, k, mode="full")[:n]
+        counts = counts + spikes
     return counts.astype(np.float64), spc
 
 

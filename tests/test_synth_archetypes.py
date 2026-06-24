@@ -151,6 +151,35 @@ def test_counts_level_shift_holds_plateaus():
     assert any(has_low_basin(x) for x in xs)
 
 
+def test_counts_spike_decay_is_asymmetric_recession():
+    # the river-hydrograph spike: each event rises sharply then RECESSES (slow exponential
+    # decay tail). With a long decay the mean post-event step is negative (declining) while a
+    # symmetric impulse (no decay) would step back up immediately — so the decay version has a
+    # heavier, slowly-falling right tail. Compare the largest event's forward profile.
+    rng = np.random.default_rng(4)
+    x_decay, _ = A.gen_counts(rng, 4000, 7, level=10.0, dispersion=0.0, level_drift=0.0,
+                              spike_rate=0.01, spike_amp=20.0, spike_decay=20.0)
+    # after the peak, the series declines gradually rather than dropping back in one step
+    pk = int(np.argmax(x_decay))
+    if pk + 25 < len(x_decay):
+        tail = x_decay[pk:pk + 25]
+        assert tail[5] > x_decay.mean() * 1.5         # still elevated 5 steps after the peak
+        assert tail[5] > tail[20]                       # and slowly receding (decay tail)
+
+
+def test_saugeenday_monthly_seasonal_naive_learnable():
+    # the monthly river aggregate has a strong ANNUAL freshet cycle — seasonal-naive (12) must
+    # clearly beat last-value, the way it does on the real saugeenday/M (snaive 0.73 < last).
+    from tetris.data import synth_archetype_recipes as R
+    x = R.gen_from_recipe(np.random.default_rng(0), "saugeenday_monthly", 600, interval_min=43800)[0]
+    season = 12
+    ctx, y = x[:-season], x[-season:]
+    scale = float(np.mean(np.abs(np.diff(ctx)))) + 1e-8
+    last = np.mean(np.abs(ctx[-1] - y)) / scale
+    snaive = np.mean(np.abs(ctx[-season:] - y)) / scale
+    assert snaive < 0.9 * last
+
+
 def test_samples_per_cycle_decoupling():
     # a 1-day cycle is 144 samples at 10-min and 24 at hourly (period x sampling freq).
     assert A.samples_per_cycle(1440, 10) == 144

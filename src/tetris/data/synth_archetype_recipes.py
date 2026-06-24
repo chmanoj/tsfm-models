@@ -244,6 +244,45 @@ RECIPES: Dict[str, dict] = {
     "bitbrains": {"period_min": 1440, "tie": 0.0, "channels": [
         ("counts", dict(level=700.0, dispersion=0.012, level_drift=0.04, level_corr_days=1.0,
                         season_amp=0.08, spike_rate=0.003, spike_amp=4.0))]},
+    # --- river / births batch (saugeenday + us_births, D/W/M) ------------------------------
+    # saugeenday = RIVER FLOW: a low non-negative baseline punctuated by sharp asymmetric FLOOD
+    # events — a fast rise then a slow exponential RECESSION (the hydrograph shape), aperiodic
+    # at D/W (weather-driven), clustering into an annual spring freshet at M. gen_counts with the
+    # NEW `spike_decay` recession. D and W differ only in the recession length in SAMPLES (the
+    # event lasts ~3 weeks ⇒ ~18 samples at D, ~3 at W) ⇒ two recipes. Real last < lin (mean-
+    # reverting to baseline): a flood spike landing in the horizon is unpredictable (hard).
+    "saugeenday_daily": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("counts", dict(level=40.0, dispersion=0.12, level_drift=0.5, level_corr_days=2.0,
+                        spike_rate=0.007, spike_amp=7.0, spike_decay=15.0))]},
+    "saugeenday_weekly": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("counts", dict(level=40.0, dispersion=0.12, level_drift=0.5, level_corr_days=4.0,
+                        spike_rate=0.022, spike_amp=7.0, spike_decay=3.0))]},
+    # saugeenday_monthly — the monthly aggregate reveals a strong ANNUAL freshet cycle (real
+    # snaive 0.31 ≪ last 0.86): a sharp spring peak repeating yearly on a low baseline. A
+    # `recurring` single_hump at the annual period (spc 12 @M) is the repeating peak (seasonal-
+    # naive learnable); mult/hf noise gives the year-to-year + within-peak variation.
+    "saugeenday_monthly": {"period_min": 525600, "tie": 0.0, "channels": [
+        ("recurring", dict(kind="single_hump", weekly=False, amp_jitter=0.35, amp_persist=0.4,
+                           noise_amp=0.05, hf_noise=0.05, mult_noise=0.15))]},
+    # us_births = BIRTH COUNTS. Daily has a strong WEEKLY cycle (weekday-high / weekend-low —
+    # scheduled deliveries) + a slow multi-year drift. The weekend dip is SHALLOW (~20%, not a
+    # deep trough) ⇒ a `business` weekly profile (spc 7 @D) blended with a dominant persistent
+    # `level` (level_frac) that both shallows the dip AND carries the slow drift. snaive-at-7
+    # beats last (the weekly profile repeats).
+    "us_births_daily": {"period_min": 10080, "tie": 0.0, "channels": [
+        ("recurring", dict(kind="business", weekly=False, amp_jitter=0.08, amp_persist=0.9,
+                           noise_amp=0.12, hf_noise=0.08, level_frac=0.7))]},
+    # us_births W / M — weekly/monthly aggregation removes the day-of-week pattern; what remains
+    # is a rounded ANNUAL cycle on a slow multi-year drift (drift_seasonal: an annual `daily_amp`
+    # sine = the repeating yearly cycle, + a multi-year drift backbone). Split by predictability:
+    # M is a CLEAN annual cycle (real snaive 0.30 ≪ last 1.00 — very learnable, low noise), W is
+    # NOISIER (real last 2.69, harder). Same archetype, different residual weight.
+    "us_births_weekly": {"period_min": 525600, "tie": 0.0, "channels": [
+        ("drift_seasonal", dict(daily_amp=0.9, daily_amp_jitter=0.3, weekly_amp=0.0,
+                                drift_corr_days=2.5, noise_amp=0.24, hf_noise=0.1))]},
+    "us_births_monthly": {"period_min": 525600, "tie": 0.0, "channels": [
+        ("drift_seasonal", dict(daily_amp=1.3, daily_amp_jitter=0.18, weekly_amp=0.0,
+                                drift_corr_days=4.0, noise_amp=0.1, hf_noise=0.04))]},
 }
 
 
