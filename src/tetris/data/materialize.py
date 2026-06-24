@@ -14,6 +14,13 @@ Examples::
     # synthetic + real GIFT-Eval pretrain (already downloaded) in one corpus
     python -m tetris.data.materialize --out outputs/corpus_mixed \\
         --n-synthetic 20000 --pretrain-root ~/Projects/gifteval/pretrain
+
+    # H1.1 TARGETED corpus: N series per GIFT-Eval test config from its validated recipe
+    # (data resembling the test split; each series tagged kind=<config>).
+    python -m tetris.data.materialize --out artifacts/corpus_recipe --n-recipe 50
+    # then validate per config (needs $GIFT_EVAL):
+    #   python -m tetris.data.synth_explore validate-corpus artifacts/corpus_recipe \\
+    #       --out-dir artifacts/corpus_validation
 """
 
 from __future__ import annotations

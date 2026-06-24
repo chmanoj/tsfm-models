@@ -251,6 +251,18 @@ The two "remaining" plan items (a `gen_targeted` dispatch + a committed *charact
   configs; weak spots are the coarse `~` /D resamplings (LOOP_SEATTLE/D, M_DENSE/D) and `m4_weekly`
   (a genuinely mixed config). Plots are run artifacts (gitignored), not committed.
 
+#### How to generate the corpus + run validation (needs the real test split locally)
+```bash
+export GIFT_EVAL=~/Projects/gifteval/test          # local GIFT-Eval test split
+
+# 1. generate the targeted corpus — 50 series per config (~2850 series, all 56 configs)
+uv run python -m tetris.data.materialize --out artifacts/corpus_recipe --n-recipe 50
+
+# 2. end-to-end validation — per-config 3 REAL vs 3 SYNTH montages (reads $GIFT_EVAL)
+uv run python -m tetris.data.synth_explore validate-corpus artifacts/corpus_recipe \
+    --out-dir artifacts/corpus_validation        # -> validate_*.png (gitignored run artifact)
+```
+
 #### Revised next steps (post-characterization)
 1. *(optional, small)* wire the `gen_counts` family + new knobs into **`gen_variety`** so the *variety*
    corpus also covers counts/impulsive/hydrograph (currently it samples only recurring/growth/

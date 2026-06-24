@@ -22,6 +22,8 @@ CLI::
     uv run python -m tetris.data.synth_explore characterize ett1/H ett2/H --n 3
     uv run python -m tetris.data.synth_explore panel LOOP_SEATTLE/H traffic_speed 60 --out p.png
     uv run python -m tetris.data.synth_explore panel-mv ett1/H ett 60 --out p.png
+    # end-to-end corpus check: per-config 3 REAL vs 3 SYNTH (from a `materialize --n-recipe` corpus)
+    uv run python -m tetris.data.synth_explore validate-corpus artifacts/corpus_recipe --out-dir v/
 """
 from __future__ import annotations
 
