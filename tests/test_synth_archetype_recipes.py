@@ -50,6 +50,36 @@ def test_m4_hourly_recipe_seasonal_naive_learnable():
     assert snaive < 0.8 * last
 
 
+def test_solar_coarse_is_low_frequency_envelope_not_flat():
+    # solar-D / solar-W are the coarse-resampled ANNUAL envelope — a low-frequency swing
+    # (rendered as a partial-cycle sine), NOT a degenerate flat line and NOT high-frequency
+    # noise. Guards the flat-panel regression: a long-correlation random drift could land flat
+    # in a <1-cycle window, so the envelope is a sine that always swings.
+    for name, iv in (("solar_daily", 1440), ("solar_weekly", 10080)):
+        x = R.gen_from_recipe(np.random.default_rng(0), name, 6000, interval_min=iv)[0]
+        tail = x[-300:]
+        assert tail.std() > 0.1, f"{name}: degenerate near-flat output"
+        # heavily smooth (kill the HF cloud noise) then count sign changes of the envelope —
+        # a genuine low-frequency annual swing has only a handful over the window.
+        z = tail - tail.mean()
+        k = max(3, len(z) // 12)
+        sm = np.convolve(z, np.ones(k) / k, mode="valid")
+        crossings = int(np.sum((sm[:-1] < 0) & (sm[1:] >= 0)))
+        assert 1 <= crossings <= 6, f"{name}: {crossings} envelope crossings — not low-freq"
+
+
+def test_electricity_coarse_regime_blocks_have_quiet_and_active_stretches():
+    # electricity-D / electricity-W are trapezoidal rise-stay-fall regime blocks over a
+    # near-flat low baseline (business profile + regime suppression): there must be BOTH
+    # elevated active stretches and quiet low stretches (not a uniform block train).
+    for name, iv in (("electricity_daily", 1440), ("electricity_weekly", 10080)):
+        x = R.gen_from_recipe(np.random.default_rng(3), name, 6000, interval_min=iv)[0]
+        w = 40
+        mu = np.array([x[i:i + w].mean() for i in range(0, len(x) - w, w)])
+        # a clearly elevated stretch and a clearly low (quiet) stretch both occur
+        assert mu.max() - mu.min() > 1.2, f"{name}: no active↔quiet regime contrast"
+
+
 def test_gen_variety_finite_and_varied():
     fams = set()
     for i in range(30):

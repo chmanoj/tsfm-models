@@ -129,17 +129,54 @@ committed **characterizer** is a next step).
     log-space shift was multiplicative/asymmetric) → switched to **additive** count-space
     shift; maintainer flagged hierarchical predictability → the MASE-parity retune above.
   Panels: `docs/tetris/sanity_experiments/synth_panels/h1_1_counts/`.
+- **Remainder batch (2026-06-24) — DONE.** Characterized kdd_cup_2018 (H+D) / temperature_rain /
+  solar-D-W / electricity-D-W / bitbrains_fast_storage (H+5T). **No new archetype** — all compose
+  from `gen_counts`, `gen_drift_seasonal`, and `gen_recurring_profile`. The gate for the *hard*
+  configs is PREDICTABILITY PARITY (kdd/electricity-D/rain are MASE ~2–4+ in the real); first passes
+  came out far too easy (last-MASE 0.2–0.8) and were re-hardened to the right regime.
+  - **kdd_cup_2018** (H+D) — non-negative pollution: a busy low baseline + broad episodic plumes
+    (H) / sharp spikes (D), heavy + poorly predictable. `gen_counts` with a fast-wandering intensity
+    (short level_corr ⇒ plumes) + overdispersion; one recipe `kdd_pollution` serves H (spc 24) and
+    D (spc clamped, sharper). Agent critique: floor too sparse → busier moderate plumes, fewer giants.
+  - **temperature_rain** — a MIXED config (to_univariate flattens temperature AND rain series), so
+    TWO recipes (like M4 subtypes): `temperature` (noisy slow drift wander, no season — `drift_seasonal`)
+    and `rain` (INTERMITTENT precip with **volatility clustering** — wet/dry periods from a strong
+    slow `gen_counts` intensity wander, *not* uniform bursts; maintainer). rain MASE is degenerate
+    (near-all-zero scale, like car_parts) ⇒ the visual wet/dry clustering is the gate.
+  - **solar-D / solar-W** — the coarse-resampled **annual envelope** (intra-day pulse gone): a
+    **low-frequency SINE + HF noise** (maintainer — *not* a random-walk-with-drift). Rendered as a
+    partial-cycle sine (`gen_drift_seasonal` `daily_amp` at the annual spc, long `drift_corr` so the
+    drift is a flat offset): a sine always swings, fixing a degenerate flat-panel a long-correlation
+    drift gave. D heavy cloud noise; W smooth (real last 1.74 < lin 2.56 — a turning hump).
+  - **electricity-D / electricity-W** — coarse regime structure that is **trapezoidal** (a block
+    rises, STAYS with HF noise, falls) over a near-flat low baseline — *not* abrupt random level
+    shifts (maintainer). Modeled as a `recurring` **business** profile at a multi-period BLOCK period
+    with `regime_quiet` suppression for the flat low stretches (a tall narrow block reads as a "spike"
+    at full scale). W = held high plateaus ↔ flat low (real last 1.05 ≪ lin 2.54); D = sparser,
+    higher-amplitude blocks (the hard quiet-baseline + sparse-tall-event regime, real last≈lin≈4.2).
+  - **bitbrains_fast_storage** (H+5T) — a quiet noisy baseline + sparse SHARP spikes (rare giants),
+    2 co-moving channels. `gen_counts` at a high level (Poisson gives the ±few-% baseline jitter) +
+    sparse spikes + a weak daily `season_amp`. Agent critique: baseline too busy / spikes too frequent
+    → quieter floor, rarer/taller giants. One recipe both freqs. (Real's weak daily learnability —
+    snaive<last — is only partially captured; the visual quiet-baseline+spikes is the gate for this
+    *easy* config.)
+  Process: self-inspect → subagent visual critic (flagged all panels: missing slow envelopes on
+  solar/temp; baselines too busy / spikes not sparse on the spiky configs) → **maintainer feedback
+  overlaid on top as tiebreaker** (elec=trapezoid+HF not random; rain=vol clustering; solar=low-freq
+  sine+HF; temp fine) → re-tuned + re-verified. Panels: `synth_panels/h1_1_remainder/`. New recipes:
+  `kdd_pollution`, `temperature`, `rain`, `solar_daily`, `solar_weekly`, `electricity_daily`,
+  `electricity_weekly`, `bitbrains` (+ recipe tests: solar low-freq-envelope guard, electricity
+  regime-contrast). **This completes the per-dataset hand-characterization of the GIFT-Eval configs**
+  (only river/births saugeenday / us_births remain, noted below).
 
 #### Status (end of 2026-06-24 session)
 - **DONE:** solar, bizitobs, electricity, covid, jena (prior) + **traffic** (LOOP_SEATTLE /
   M_DENSE / SZ_TAXI), **ETT** (ett1/ett2), **M4** (all 6 freqs) (prior session) + **counts/retail**
-  (restaurant / car_parts / hospital / hierarchical_sales D+W) (this session).
-- **REMAINING (next session, in order — maintainer asked to do the remainder batch FIRST):**
-  remainder (kdd_cup_2018 / temperature_rain / solar-D/W / electricity-D/W /
-  bitbrains_fast_storage) → river/births (saugeenday / us_births). Note: solar-D/W and
-  electricity-D/W are coarse re-samplings of already-characterized patterns (period×interval,
-  likely no new archetype); temperature_rain / bitbrains_fast_storage are impulsive (quiet
-  baseline + sparse spikes — close to the existing `spikes` path / `gen_counts` spike mechanism).
+  (restaurant / car_parts / hospital / hierarchical_sales D+W) + **remainder** (kdd_cup_2018 H+D /
+  temperature_rain / solar-D/W / electricity-D/W / bitbrains_fast_storage H+5T) (this session).
+- **REMAINING (next session):** river/births (saugeenday / us_births) — the last hand-characterization
+  batch. Then build the committed characterizer / `gen_targeted` dispatch and the 20M validation run
+  (steps 2–3 of "Next steps" below).
 - **Current archetype vocabulary** — `PROFILE_KINDS`: `pulse`, `business`, `double_hump`,
   `single_hump`, **`valley`** (high plateau notched down by dips — traffic speed), **`broad_hump`**
   (wide rounded soft trapezoid — traffic/taxi flow). `gen_recurring_profile` knobs incl.
@@ -147,9 +184,14 @@ committed **characterizer** is a next step).
   (white HF jitter), **`trend`** (persistent linear drift), **`daily_amp_jitter`** (per-cycle
   peak-height variation). **NEW `gen_counts`** (overdispersed non-negative integer counts;
   knobs `dispersion`, `intermittent`, `shift_amp` additive held-plateau level shifts,
-  `spike_rate`/`spike_amp`) — the counts/intermittent/retail family. Recipes: solar, bizitobs,
-  electricity, covid, jena, ett, traffic_flow, traffic_speed, taxi_demand, m4_hourly, m4_trend,
-  m4_annual, m4_spiky, restaurant, hospital, car_parts, hierarchical_sales.
+  `spike_rate`/`spike_amp`, **`season_amp`** weak repeating modulation) — the counts/intermittent/
+  retail family (and reused for non-negative bursty/impulsive data: kdd pollution, bitbrains storage).
+  Recipes: solar, bizitobs, electricity, covid, jena, ett, traffic_flow, traffic_speed, taxi_demand,
+  m4_hourly, m4_trend, m4_annual, m4_spiky, restaurant, hospital, car_parts, hierarchical_sales,
+  **kdd_pollution, temperature, rain, solar_daily, solar_weekly, electricity_daily, electricity_weekly,
+  bitbrains** (remainder batch). Note: the **coarse re-samplings** (solar-D/W = annual sine envelope;
+  electricity-D/W = trapezoidal regime blocks) reuse existing generators via period×interval — no new
+  archetype was needed for any remainder config.
 
 #### Committed tooling (`src/tetris/data/synth_explore.py`)
 The per-dataset workflow tools (replaces the throwaway scratchpad scripts). Reads real data

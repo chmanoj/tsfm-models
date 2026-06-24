@@ -169,6 +169,81 @@ RECIPES: Dict[str, dict] = {
     "hierarchical_sales": {"period_min": 10080, "tie": 0.0, "channels": [
         ("counts", dict(level=4.0, dispersion=0.4, level_drift=0.2, level_corr_days=6.0,
                         spike_rate=0.018, spike_amp=28.0))]},
+    # --- remainder batch (kdd / temperature_rain / solar-D-W / electricity-D-W / bitbrains) --
+    # kdd_cup_2018 (air-quality / pollution concentration): a non-negative LOW baseline (~50)
+    # with broad EPISODIC bursts (plumes that rise + fall over many hours at H, sharp spikes
+    # at D) and heavy overdispersion — poorly predictable (real snaive≈last≈lin≈3.8–4.0). Not
+    # counts literally, but the texture is exactly the overdispersed non-negative bursty shape
+    # gen_counts makes: a fast-wandering intensity (short level_corr ⇒ the bursts) + sparse tall
+    # plumes. One recipe serves H (interval 60 ⇒ spc 24, ~half-day bursts) and D (interval 1440
+    # ⇒ spc clamped, sharper). The gate is PREDICTABILITY PARITY (it must stay hard), not learnable.
+    "kdd_pollution": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("counts", dict(level=50.0, dispersion=0.6, level_drift=1.3, level_corr_days=0.5,
+                        spike_rate=0.012, spike_amp=5.0))]},
+    # temperature_rain is a MIXED config (to_univariate flattens temperature AND rain series),
+    # so it needs two recipes (like M4's per-subtype recipes):
+    #   * temperature — a noisy slow WANDER (broad multi-month humps = the annual swing seen
+    #     over <2 cycles) with heavy day-to-day jitter; aperiodic (m=1), lin≈last (~1.1) since
+    #     the local drift gives a slope. drift_seasonal backbone (no season) + large noise/hf.
+    "temperature": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("drift_seasonal", dict(daily_amp=0.0, weekly_amp=0.0, drift_corr_days=8.0,
+                                noise_amp=0.35, hf_noise=0.18))]},
+    #   * rain — INTERMITTENT precipitation with VOLATILITY CLUSTERING: alternating WET periods
+    #     (frequent large bursts) and DRY periods (long calm zero stretches) — *not* uniformly
+    #     random bursts (maintainer). Driven by a strong, slow intensity wander (large level_drift
+    #     + multi-period corr) so λ swings between wet (big overdispersed counts) and dry (zeros);
+    #     the bursts come from λ, not a uniform spike rate. MASE is DEGENERATE here (near-all-zero
+    #     ⇒ naive-diff scale collapses, like car_parts) so the VISUAL wet/dry clustering is the gate.
+    "rain": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("counts", dict(level=2.5, dispersion=1.8, level_drift=2.0, level_corr_days=6.0,
+                        intermittent=0.7, spike_rate=0.006, spike_amp=22.0))]},
+    # solar-D / solar-W are coarse re-samplings of solar: the intra-day pulse is gone; what
+    # remains is the ANNUAL production envelope (summer high, winter low) seen over <2 cycles —
+    # a slow rise-peak-fall hump. D carries heavy day-to-day CLOUD variability; W (aggregated)
+    # is smooth. Composed from drift_seasonal's slow-drift backbone (the hump) — two recipes
+    # since the noise level differs sharply (real last≈lin≈0.99 at D; last 1.74 < lin 2.56 at W,
+    # a mean-reverting hump). spc set so the drift correlation spans the window.
+    # The annual envelope is rendered as a partial-cycle SINE (daily_amp at the annual spc) —
+    # a sine always swings (a long-correlation random drift can land flat in a <1-cycle window,
+    # which earlier gave a degenerate flat panel). drift_corr_days is set LONG so the drift is a
+    # near-flat offset and the sine envelope dominates. D carries heavy cloud noise; W is smooth.
+    "solar_daily": {"period_min": 525600, "tie": 0.0, "channels": [
+        ("drift_seasonal", dict(daily_amp=1.3, daily_amp_jitter=0.2, weekly_amp=0.0,
+                                drift_corr_days=2.0, noise_amp=0.4, hf_noise=0.28))]},
+    "solar_weekly": {"period_min": 525600, "tie": 0.0, "channels": [
+        ("drift_seasonal", dict(daily_amp=1.3, daily_amp_jitter=0.15, weekly_amp=0.0,
+                                drift_corr_days=2.0, noise_amp=0.16, hf_noise=0.07))]},
+    # electricity-D / electricity-W are coarse re-samplings of electricity: the intraday
+    # double-hump is gone; what remains is REGIME structure that is **trapezoidal** (a block
+    # RISES to a high level, STAYS for a stretch with HF noise, then FALLS back) over a near-flat
+    # low baseline — *not* abrupt random level shifts (maintainer). Modeled as a `recurring`
+    # **business** profile (the rise/stay/fall trapezoid) at a multi-period BLOCK period, with
+    # per-block amplitude variation (tall ↔ short blocks) and `regime_quiet` stretches that scale
+    # quiet runs down to a near-flat low baseline, plus HF noise on the plateaus. A tall narrow
+    # block reads as a "spike" at full scale (lesson: a tall narrow trapezoid looks like a spike).
+    #   * electricity_weekly — blocks ~30 weeks (period 302400 min ⇒ spc 30 @W); held high
+    #     plateaus alternating with flat low baseline (real last 1.05 ≪ lin 2.54: last-value
+    #     forecasts within a held block, linear overshoots at the edges).
+    "electricity_weekly": {"period_min": 302400, "tie": 0.0, "channels": [
+        ("recurring", dict(kind="business", weekly=False, amp_jitter=0.4, amp_persist=0.7,
+                           noise_amp=0.04, hf_noise=0.12, regime_prob=0.16,
+                           regime_quiet=(0.02, 0.1)))]},
+    #   * electricity_daily — shorter blocks (~20 days, period 28800 ⇒ spc 20 @D) with HIGH
+    #     per-block amplitude variation (low persistence) so occasional tall narrow blocks read
+    #     as the sparse tall spikes seen on the quiet baseline — very hard (real last≈lin≈4.2:
+    #     a tall block landing in the horizon wrecks any forecast, predictability-parity gate).
+    "electricity_daily": {"period_min": 43200, "tie": 0.0, "channels": [
+        ("recurring", dict(kind="business", weekly=False, amp_jitter=0.7, amp_persist=0.5,
+                           noise_amp=0.05, hf_noise=0.15, regime_prob=0.16,
+                           regime_quiet=(0.03, 0.12)))]},
+    # bitbrains_fast_storage (H + 5T): a QUIET noisy baseline (~700) with sparse SHARP spikes
+    # (rare giants to several× baseline), two co-moving channels. Exactly the overdispersed
+    # non-negative quiet-baseline + sparse-spike shape — gen_counts at a high level (Poisson
+    # noise gives the ±few-% baseline jitter) + spike_rate. Aperiodic spikes (5T last 1.25 <
+    # snaive 1.60); H weakly daily (snaive 0.654 < last 0.675). One recipe for both freqs.
+    "bitbrains": {"period_min": 1440, "tie": 0.0, "channels": [
+        ("counts", dict(level=700.0, dispersion=0.012, level_drift=0.04, level_corr_days=1.0,
+                        season_amp=0.08, spike_rate=0.003, spike_amp=4.0))]},
 }
 
 
