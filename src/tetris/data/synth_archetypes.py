@@ -218,7 +218,7 @@ def _smooth_resid(rng, n: int, corr: float = 4.0) -> np.ndarray:
 
 def gen_drift_seasonal(
     rng, n: int, spc: int, *, drift_corr_days: float = 8.0, weekly_amp: float = 0.0,
-    daily_amp: float = 0.0, noise_amp: float = 0.12,
+    daily_amp: float = 0.0, noise_amp: float = 0.12, hf_noise: float = 0.0,
 ) -> Tuple[np.ndarray, int]:
     """The **multi-scale weather/drift** archetype (jena): a slow long-correlation drift
     backbone (the seasonal swing, which over a short forecast context reads as persistent
@@ -245,7 +245,11 @@ def gen_drift_seasonal(
         n_days = int(np.ceil(n / spc))
         damp = _persistent_amp(rng, n_days, jitter=0.45, persist=0.7)
         out = out + daily_amp * np.repeat(damp, spc)[:n] * np.sin(phase)
+    # smooth low-freq residual + optional WHITE high-frequency jitter (real ETT/weather
+    # have genuine sample-to-sample noise; the smooth residual alone reads too clean).
     out = S._standardize(out) + noise_amp * S._standardize(_smooth_resid(rng, n, corr=2.0))
+    if hf_noise > 0:
+        out = out + hf_noise * rng.normal(0, 1, n)
     return out.astype(np.float64), 7 * spc
 
 

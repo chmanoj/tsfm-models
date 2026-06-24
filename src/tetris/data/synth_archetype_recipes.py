@@ -50,22 +50,26 @@ def _ett_channels() -> List[Tuple[str, dict]]:
     # drift backbone + a rounded daily cycle + noise (drift_seasonal); one load channel is
     # a blocky on/off load-switch (business + regime); the oil-temp channel (last) is a
     # near-pure smooth drift with no daily cycle.
-    # daily cycle kept UNDER the drift (lower amp) — real ETT drift/regime dominates and the
-    # daily cycle is a jittered modulation, not the dominant signal (maintainer-critique fix).
-    daily = dict(weekly_amp=0.0, daily_amp=0.45, drift_corr_days=18.0, noise_amp=0.18)
-    daily_noisy = dict(weekly_amp=0.0, daily_amp=0.32, drift_corr_days=14.0, noise_amp=0.35)
+    # daily cycle COMPARABLE to the drift (real ETT shows both a clear daily cycle AND a
+    # slow drift), with a *shorter* drift correlation so the drift doesn't become one giant
+    # swing that crushes the daily at fine sampling, + WHITE hf_noise (real channels have
+    # genuine sample-to-sample jitter; was reading too clean). Per-day amp jitter keeps the
+    # daily from being a constant-amplitude sine.
+    daily = dict(weekly_amp=0.0, daily_amp=0.7, drift_corr_days=7.0, noise_amp=0.1, hf_noise=0.12)
+    daily_noisy = dict(weekly_amp=0.0, daily_amp=0.62, drift_corr_days=6.0, noise_amp=0.14,
+                       hf_noise=0.14)
     return [
         ("drift_seasonal", dict(daily)),                  # ch0: drift + clear daily
         ("drift_seasonal", dict(daily_noisy)),            # ch1: noisier daily
         ("drift_seasonal", dict(daily)),                  # ch2: drift + clear daily
         ("drift_seasonal", dict(daily_noisy)),            # ch3: noisier daily
-        ("drift_seasonal", dict(weekly_amp=0.0, daily_amp=0.22, drift_corr_days=20.0,
-                                noise_amp=0.25)),          # ch4: drift-leaning + weak daily
+        ("drift_seasonal", dict(weekly_amp=0.0, daily_amp=0.45, drift_corr_days=9.0,
+                                noise_amp=0.15, hf_noise=0.14)),  # ch4: drift + moderate daily
         ("recurring", dict(kind="business", weekly=False, amp_persist=0.85, amp_jitter=0.2,
-                           noise_amp=0.12, regime_prob=0.06,
+                           noise_amp=0.12, hf_noise=0.1, regime_prob=0.06,
                            regime_quiet=(0.05, 0.2))),      # ch5: blocky load-switch
-        ("drift_seasonal", dict(weekly_amp=0.0, daily_amp=0.05, drift_corr_days=24.0,
-                                noise_amp=0.08)),           # ch6: oil-temp, near-pure drift
+        ("drift_seasonal", dict(weekly_amp=0.0, daily_amp=0.06, drift_corr_days=14.0,
+                                noise_amp=0.05, hf_noise=0.04)),  # ch6: oil-temp, near-pure drift
     ]
 
 

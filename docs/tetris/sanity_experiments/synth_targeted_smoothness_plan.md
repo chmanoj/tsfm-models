@@ -80,8 +80,14 @@ committed **characterizer** is a next step).
   cross-corr 0.7–0.99 on the load block, ~0 elsewhere) → `tie=0.3`. Subagent critique
   caught a **too-clean, too-dominant constant-amplitude daily sine**; fixed by giving the
   `gen_drift_seasonal` daily cycle **per-day AR(1) amplitude jitter** (waxing/waning under
-  the drift) and lowering its weight so the drift/regime backbone dominates. Panels:
-  `docs/tetris/sanity_experiments/synth_panels/h1_1_ett/`.
+  the drift) and lowering its weight so the drift/regime backbone dominates. **Second round
+  (maintainer):** (i) hourly synth read *too clean* (no HF jitter) → added a white
+  `hf_noise` term to `gen_drift_seasonal`; (ii) at **15T** the daily cycle was crushed into
+  a near-linear ramp by an over-long, over-dominant drift → **shortened `drift_corr_days`**
+  (≈6–9) so the drift doesn't become one giant swing, and **raised `daily_amp` to be
+  comparable to the drift** so the daily cycle is clearly visible at fine sampling. Subagent
+  re-review confirmed all three issues fixed with no regressions (daily not buried, OT still
+  smooth, no clipping). Panels: `docs/tetris/sanity_experiments/synth_panels/h1_1_ett/`.
 
 ### How to generate data NOW (`src/tetris/data/synth_archetype_recipes.py`)
 The validated recipes + a variety sampler are committed so the generators are usable
